@@ -70,6 +70,14 @@ static Component with_paste(Component inner, std::string* target) {
     });
 }
 
+// Format a 60-digit safety number into two display rows (3 groups of 10 each).
+static std::string sn_row(const std::string& digits, size_t start) {
+    if (digits.size() < start + 30) return {};
+    return digits.substr(start, 10) + "   " +
+           digits.substr(start + 10, 10) + "   " +
+           digits.substr(start + 20, 10);
+}
+
 // ── ChatUi ───────────────────────────────────────────────────────────────────
 
 ChatUi::ChatUi(cloak::app::ChatApplication& app) : app_(app) {}
@@ -80,36 +88,64 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
     auto screen = ScreenInteractive::Fullscreen();
 
     // ── Shared state (written by background threads, read by renderer) ─────────
-    std::mutex                                           state_mutex;
+    std::mutex                                              state_mutex;
     std::vector<cloak::app::ChatApplication::MessageEntry> messages;
     std::vector<cloak::app::ChatApplication::PeerInfo>     peers;
-    std::string                                            status_line = "Ready";
-    std::string                                            invite_code_str;
+    std::vector<cloak::app::ChatApplication::GroupEntry>   groups;
+    std::string                                             status_line = "Ready";
+    std::string                                             invite_code_str;
 
     // ── UI-thread-only state ───────────────────────────────────────────────────
     std::string  input_text;
     std::string  join_code_input;
     std::string  direct_host_input;
     std::string  direct_port_input;
-    bool         show_invite_modal = false;
-    bool         show_join_modal   = false;
-    bool         show_direct_modal = false;
-    bool         invite_generating = false;
-    int          peer_selected     = 0;
-    // Tab: 0 = main UI, 1 = invite modal, 2 = join modal, 3 = direct modal
-    int          active_tab        = 0;
+    std::string  new_group_name_input;
+    std::string  file_path_input;
+    std::string  safety_line1;
+    std::string  safety_line2;
+
+    bool  show_invite_modal  = false;
+    bool  show_join_modal    = false;
+    bool  show_direct_modal  = false;
+    bool  show_safety_modal  = false;
+    bool  show_group_modal   = false;
+    bool  show_file_modal    = false;
+    bool  invite_generating  = false;
+
+    int  peer_selected  = 0;
+    int  group_selected = 0;
+
+    // Tab: 0=main, 1=invite, 2=join, 3=direct, 4=safety, 5=group-create, 6=file-send
+    int  active_tab = 0;
 
     std::vector<std::string> peer_entries;
+    std::vector<std::string> group_entries;
 
-    // ── Initial peer load ──────────────────────────────────────────────────────
-    {
-        peers = app_.get_peers();
-        for (const auto& p : peers) {
-            std::string label = (p.online ? " \u25cf " : " \u25cb ") + p.name;
-            if (p.verified)     label += " \u2713";
+    auto rebuild_peer_entries = [&](const std::vector<cloak::app::ChatApplication::PeerInfo>& ps) {
+        peer_entries.clear();
+        for (const auto& p : ps) {
+            std::string label = (p.online ? " ● " : " ○ ") + p.name;
+            if (p.verified)     label += " ✓";
             if (p.queued_count) label += " [" + std::to_string(p.queued_count) + "]";
             peer_entries.push_back(label);
         }
+    };
+
+    auto rebuild_group_entries = [&](const std::vector<cloak::app::ChatApplication::GroupEntry>& gs) {
+        group_entries.clear();
+        for (const auto& g : gs) {
+            std::string label = (g.active ? " ● " : " ○ ") + g.name;
+            group_entries.push_back(label);
+        }
+    };
+
+    // ── Initial load ───────────────────────────────────────────────────────────
+    {
+        peers  = app_.get_peers();
+        groups = app_.get_groups();
+        rebuild_peer_entries(peers);
+        rebuild_group_entries(groups);
     }
 
     // ── Callbacks from background threads ──────────────────────────────────────
@@ -125,14 +161,10 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
     app_.set_peer_change_callback([&]() {
         {
             std::lock_guard lock(state_mutex);
-            peers = app_.get_peers();
-            peer_entries.clear();
-            for (const auto& p : peers) {
-                std::string label = (p.online ? " \u25cf " : " \u25cb ") + p.name;
-                if (p.verified)     label += " \u2713";
-                if (p.queued_count) label += " [" + std::to_string(p.queued_count) + "]";
-                peer_entries.push_back(label);
-            }
+            peers  = app_.get_peers();
+            groups = app_.get_groups();
+            rebuild_peer_entries(peers);
+            rebuild_group_entries(groups);
         }
         post_refresh();
     });
@@ -160,8 +192,22 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         std::thread([&, t]() { static_cast<void>(app_.send_text_to_current(t)); }).detach();
     }, ButtonOption::Ascii());
 
-    // Left panel: action buttons.
-    auto search_btn = Button(" [\u25ce] Search LAN ", [&] {
+    // Group message send button.
+    auto group_send_btn = Button(" Group Msg ", [&] {
+        if (input_text.empty()) return;
+        std::string t = input_text; input_text.clear();
+        std::thread([&, t]() {
+            auto res = app_.send_group_message(t);
+            if (!res) {
+                std::lock_guard lock(state_mutex);
+                status_line = "Group send failed: " + res.error().message;
+                post_refresh();
+            }
+        }).detach();
+    }, ButtonOption::Ascii());
+
+    // Left panel: connection buttons.
+    auto search_btn = Button(" [◎] Search LAN ", [&] {
         {
             std::lock_guard lock(state_mutex);
             status_line = "Searching LAN...";
@@ -171,20 +217,14 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             std::lock_guard lock(state_mutex);
             peers = app_.get_peers();
-            peer_entries.clear();
-            for (const auto& p : peers) {
-                std::string label = (p.online ? " \u25cf " : " \u25cb ") + p.name;
-                if (p.verified)     label += " \u2713";
-                if (p.queued_count) label += " [" + std::to_string(p.queued_count) + "]";
-                peer_entries.push_back(label);
-            }
+            rebuild_peer_entries(peers);
             status_line = peers.empty() ? "No peers found" :
                 std::to_string(peers.size()) + " peer(s) found";
             post_refresh();
         }).detach();
     }, ButtonOption::Ascii());
 
-    auto invite_btn = Button(" [\u2709] Invite Code ", [&] {
+    auto invite_btn = Button(" [✉] Invite Code ", [&] {
         show_invite_modal = true;
         active_tab        = 1;
         invite_generating = true;
@@ -196,24 +236,53 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
                 std::lock_guard lock(state_mutex);
                 invite_generating = false;
                 invite_code_str   = res ? *res : "[Error] " + res.error().message;
-                status_line       = res ? "Invite code ready \u2014 share it!" : res.error().message;
+                status_line       = res ? "Invite code ready — share it!" : res.error().message;
             }
             post_refresh();
         }).detach();
     }, ButtonOption::Ascii());
 
-    auto join_btn = Button(" [\u21aa] Join via Code ", [&] {
+    auto join_btn = Button(" [↪] Join via Code ", [&] {
         join_code_input   = "";
         show_join_modal   = true;
         active_tab        = 2;
         post_refresh();
     }, ButtonOption::Ascii());
 
-    auto direct_btn = Button(" [\u27a1] Direct Connect ", [&] {
+    auto direct_btn = Button(" [➡] Direct Connect ", [&] {
         direct_host_input = "";
         direct_port_input = "";
         show_direct_modal = true;
         active_tab        = 3;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    // Safety number button.
+    auto safety_btn = Button(" [⚿] Safety Number ", [&] {
+        const std::string sn = app_.get_safety_number();
+        if (sn.empty()) {
+            std::lock_guard lock(state_mutex);
+            status_line = "No active session — connect to a peer first";
+            post_refresh();
+            return;
+        }
+        if (sn.size() >= 60) {
+            safety_line1 = sn_row(sn, 0);
+            safety_line2 = sn_row(sn, 30);
+        } else {
+            safety_line1 = sn;
+            safety_line2 = {};
+        }
+        show_safety_modal = true;
+        active_tab        = 4;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    // Send file button.
+    auto send_file_open_btn = Button(" [▶] Send File ", [&] {
+        file_path_input = "";
+        show_file_modal = true;
+        active_tab      = 6;
         post_refresh();
     }, ButtonOption::Ascii());
 
@@ -230,13 +299,56 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
     };
     auto peer_menu = Menu(&peer_entries, &peer_selected, menu_opt);
 
+    // Group list menu.
+    MenuOption group_menu_opt = MenuOption::Vertical();
+    group_menu_opt.on_change = [&] {
+        if (group_selected >= 0 && group_selected < static_cast<int>(groups.size()))
+            static_cast<void>(app_.switch_group(static_cast<size_t>(group_selected)));
+        post_refresh();
+    };
+    auto group_menu = Menu(&group_entries, &group_selected, group_menu_opt);
+
+    // Group action buttons.
+    auto create_group_btn = Button(" [+] Create Group ", [&] {
+        new_group_name_input = "";
+        show_group_modal     = true;
+        active_tab           = 5;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    auto invite_group_btn = Button(" [→] Invite to Group ", [&] {
+        std::thread([&]() {
+            auto res = app_.invite_current_peer_to_group();
+            std::lock_guard lock(state_mutex);
+            if (res) {
+                groups = app_.get_groups();
+                rebuild_group_entries(groups);
+                status_line = "Peer invited to group!";
+            } else {
+                status_line = "Invite failed: " + res.error().message;
+            }
+            post_refresh();
+        }).detach();
+    }, ButtonOption::Ascii());
+
+    auto leave_group_btn = Button(" [x] Leave Group ", [&] {
+        std::thread([&]() {
+            auto res = app_.leave_group();
+            std::lock_guard lock(state_mutex);
+            groups = app_.get_groups();
+            rebuild_group_entries(groups);
+            status_line = res ? "Left group." : "Leave failed: " + res.error().message;
+            post_refresh();
+        }).detach();
+    }, ButtonOption::Ascii());
+
     // Copy-address button.
     std::string copy_addr_label = " Copy Addr ";
     auto copy_addr_btn = Button(&copy_addr_label, [&] {
         const uint16_t    port = app_.my_listen_port();
         const std::string addr = app_.my_lan_ip() + ":" + std::to_string(port);
         clip_set(addr);
-        copy_addr_label = " Copied! \u2713 ";
+        copy_addr_label = " Copied! ✓ ";
         std::thread([&] {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             copy_addr_label = " Copy Addr ";
@@ -249,7 +361,7 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
     std::string copy_code_label = "  Copy Code  ";
     auto copy_code_btn = Button(&copy_code_label, [&] {
         clip_set(invite_code_str);
-        copy_code_label = "  Copied! \u2713  ";
+        copy_code_label = "  Copied! ✓  ";
         std::thread([&] {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             copy_code_label = "  Copy Code  ";
@@ -331,17 +443,155 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         post_refresh();
     }, ButtonOption::Ascii());
 
-    // ── Container assembly ─────────────────────────────────────────────────────
-    // KEY FIX: left panel and input row are BOTH inside main_comp (tab 0).
-    // This means mouse clicks on ANY button and keyboard events in the
-    // message input all work simultaneously when no modal is open.
+    // ── Safety number modal components ────────────────────────────────────────
+    auto verify_peer_btn = Button("  Mark Verified ✓  ", [&] {
+        auto res = app_.verify_current_peer();
+        show_safety_modal = false;
+        active_tab        = 0;
+        {
+            std::lock_guard lock(state_mutex);
+            peers = app_.get_peers();
+            rebuild_peer_entries(peers);
+            status_line = res ? "Peer marked as verified ✓" :
+                                "Verify failed: " + res.error().message;
+        }
+        post_refresh();
+    }, ButtonOption::Ascii());
 
+    auto close_safety_btn = Button("  Close  ", [&] {
+        show_safety_modal = false;
+        active_tab        = 0;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    auto safety_modal_comp = Container::Vertical({
+        Container::Horizontal({verify_peer_btn, close_safety_btn}),
+    });
+
+    // ── Create group modal components ─────────────────────────────────────────
+    InputOption group_inp_opt;
+    group_inp_opt.on_enter = [&] {
+        if (new_group_name_input.empty()) return;
+        std::string name = new_group_name_input;
+        show_group_modal     = false;
+        active_tab           = 0;
+        new_group_name_input = "";
+        std::thread([&, name]() {
+            auto res = app_.create_group(name);
+            std::lock_guard lock(state_mutex);
+            groups = app_.get_groups();
+            rebuild_group_entries(groups);
+            status_line = res ? "Group '" + name + "' created ✓" :
+                                "Create failed: " + res.error().message;
+            post_refresh();
+        }).detach();
+    };
+    auto group_name_input_comp = with_paste(
+        Input(&new_group_name_input, "Group name (e.g. Team Alpha)", group_inp_opt),
+        &new_group_name_input);
+
+    auto create_group_confirm_btn = Button("  Create  ", [&] {
+        if (new_group_name_input.empty()) return;
+        std::string name = new_group_name_input;
+        show_group_modal     = false;
+        active_tab           = 0;
+        new_group_name_input = "";
+        std::thread([&, name]() {
+            auto res = app_.create_group(name);
+            std::lock_guard lock(state_mutex);
+            groups = app_.get_groups();
+            rebuild_group_entries(groups);
+            status_line = res ? "Group '" + name + "' created ✓" :
+                                "Create failed: " + res.error().message;
+            post_refresh();
+        }).detach();
+    }, ButtonOption::Ascii());
+
+    auto cancel_group_btn = Button("  Cancel  ", [&] {
+        show_group_modal = false;
+        active_tab       = 0;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    auto group_modal_comp = Container::Vertical({
+        group_name_input_comp,
+        Container::Horizontal({create_group_confirm_btn, cancel_group_btn}),
+    });
+
+    // ── File send modal components ─────────────────────────────────────────────
+    InputOption file_inp_opt;
+    file_inp_opt.on_enter = [&] {
+        if (file_path_input.empty()) return;
+        std::string path = file_path_input;
+        show_file_modal = false;
+        active_tab      = 0;
+        file_path_input = "";
+        { std::lock_guard lock(state_mutex); status_line = "Sending file..."; }
+        post_refresh();
+        std::thread([&, path]() {
+            auto res = app_.send_file_to_current(path,
+                [&](uint64_t sent, uint64_t total) {
+                    const int pct = total > 0 ? static_cast<int>(sent * 100 / total) : 0;
+                    std::lock_guard lock(state_mutex);
+                    status_line = "Sending... " + std::to_string(pct) + "% (" +
+                        std::to_string(sent) + "/" + std::to_string(total) + " B)";
+                    post_refresh();
+                });
+            std::lock_guard lock(state_mutex);
+            status_line = res ? "File sent successfully ✓" :
+                                "Send failed: " + res.error().message;
+            post_refresh();
+        }).detach();
+    };
+    auto file_path_input_comp = with_paste(
+        Input(&file_path_input, "Full path, e.g. C:\\Users\\...\\photo.png", file_inp_opt),
+        &file_path_input);
+
+    auto do_send_file_btn = Button("  Send File  ", [&] {
+        if (file_path_input.empty()) return;
+        std::string path = file_path_input;
+        show_file_modal = false;
+        active_tab      = 0;
+        file_path_input = "";
+        { std::lock_guard lock(state_mutex); status_line = "Sending file..."; }
+        post_refresh();
+        std::thread([&, path]() {
+            auto res = app_.send_file_to_current(path,
+                [&](uint64_t sent, uint64_t total) {
+                    const int pct = total > 0 ? static_cast<int>(sent * 100 / total) : 0;
+                    std::lock_guard lock(state_mutex);
+                    status_line = "Sending... " + std::to_string(pct) + "% (" +
+                        std::to_string(sent) + "/" + std::to_string(total) + " B)";
+                    post_refresh();
+                });
+            std::lock_guard lock(state_mutex);
+            status_line = res ? "File sent successfully ✓" :
+                                "Send failed: " + res.error().message;
+            post_refresh();
+        }).detach();
+    }, ButtonOption::Ascii());
+
+    auto cancel_file_btn = Button("  Cancel  ", [&] {
+        show_file_modal = false;
+        active_tab      = 0;
+        post_refresh();
+    }, ButtonOption::Ascii());
+
+    auto file_modal_comp = Container::Vertical({
+        file_path_input_comp,
+        Container::Horizontal({do_send_file_btn, cancel_file_btn}),
+    });
+
+    // ── Container assembly ─────────────────────────────────────────────────────
     auto left_panel_comp = Container::Vertical({
         search_btn, invite_btn, join_btn, direct_btn,
+        safety_btn, send_file_open_btn,
         peer_menu,
+        create_group_btn, invite_group_btn, leave_group_btn,
+        group_menu,
         copy_addr_btn,
     });
-    auto input_row = Container::Horizontal({msg_input, send_btn});
+    auto input_row = Container::Horizontal({msg_input, send_btn, group_send_btn});
     auto main_comp = Container::Horizontal({left_panel_comp, input_row});
 
     auto invite_modal_comp = Container::Vertical({
@@ -356,12 +606,15 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         Container::Horizontal({do_direct_btn, cancel_direct_btn}),
     });
 
-    // Tab 0 = main_comp, 1 = invite, 2 = join, 3 = direct.
+    // Tab 0=main, 1=invite, 2=join, 3=direct, 4=safety, 5=group-create, 6=file-send
     auto root_comp = Container::Tab({
         main_comp,
         invite_modal_comp,
         join_modal_comp,
         direct_modal_comp,
+        safety_modal_comp,
+        group_modal_comp,
+        file_modal_comp,
     }, &active_tab);
 
     // ── Master renderer ────────────────────────────────────────────────────────
@@ -370,24 +623,34 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         // Snapshot shared state.
         std::vector<cloak::app::ChatApplication::MessageEntry> msgs_snap;
         std::vector<cloak::app::ChatApplication::PeerInfo>     peers_snap;
+        std::vector<cloak::app::ChatApplication::GroupEntry>   groups_snap;
         std::string sys_snap;
         std::string invite_snap;
         {
             std::lock_guard lock(state_mutex);
             msgs_snap   = messages;
             peers_snap  = peers;
+            groups_snap = groups;
             sys_snap    = status_line;
             invite_snap = invite_code_str;
         }
 
         // ── Status bar ────────────────────────────────────────────────────────
         const std::string fp_short = app_.my_fingerprint().substr(0, 12) + "...";
+        const std::string group_indicator =
+            app_.has_active_group() ? " ▣ " + app_.active_group_name() + " " : "";
         auto status_bar = hbox({
             text(" " + app_.my_name() + " ") | bold | color(Color::Black) | bgcolor(Color::Blue),
             text(" FP: " + fp_short + " ") | color(Color::GrayLight),
             separator(),
             text(" " + std::to_string(peers_snap.size()) + " peer(s) ") | color(Color::Cyan),
             separator(),
+            group_indicator.empty()
+                ? text("") | size(WIDTH, EQUAL, 0)
+                : hbox({
+                    text(group_indicator) | color(Color::Magenta),
+                    separator(),
+                  }),
             text(" " + sys_snap + " ") | color(Color::Green) | flex,
             text(" Cloak 0.4 ") | color(Color::GrayDark),
         });
@@ -404,6 +667,8 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         left_elems.push_back(invite_btn->Render());
         left_elems.push_back(join_btn->Render());
         left_elems.push_back(direct_btn->Render());
+        left_elems.push_back(safety_btn->Render());
+        left_elems.push_back(send_file_open_btn->Render());
         left_elems.push_back(separator());
 
         if (peer_entries.empty()) {
@@ -415,12 +680,27 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
             left_elems.push_back(peer_menu->Render() | flex);
         }
 
+        // ── Groups section ────────────────────────────────────────────────────
+        left_elems.push_back(separator());
+        left_elems.push_back(text(" Groups ") | bold | color(Color::Magenta));
+        left_elems.push_back(create_group_btn->Render());
+        if (app_.has_active_group()) {
+            left_elems.push_back(invite_group_btn->Render());
+            left_elems.push_back(leave_group_btn->Render());
+        }
+        if (!group_entries.empty()) {
+            left_elems.push_back(text(" Select group: ") | color(Color::GrayLight));
+            left_elems.push_back(group_menu->Render());
+        } else {
+            left_elems.push_back(text(" No groups yet ") | color(Color::GrayDark) | italic);
+        }
+
         left_elems.push_back(separator());
         left_elems.push_back(text(" Your address: ") | color(Color::GrayDark));
         left_elems.push_back(text(" " + my_addr + " ") | bold | color(Color::Yellow));
         left_elems.push_back(copy_addr_btn->Render());
 
-        auto left_panel = vbox(left_elems) | border | size(WIDTH, EQUAL, 27);
+        auto left_panel = vbox(left_elems) | border | size(WIDTH, EQUAL, 29);
 
         // ── Message area ──────────────────────────────────────────────────────
         Elements msg_elems;
@@ -445,12 +725,22 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
             }
         }
 
+        // Show group hint in input area when group is active.
+        const bool   has_group = app_.has_active_group();
+        const std::string group_hint = has_group
+            ? " [Group: " + app_.active_group_name() + "] "
+            : "";
+
         auto right_panel = vbox({
             vbox(msg_elems) | flex | frame,
             separator(),
+            has_group
+                ? text(group_hint) | color(Color::Magenta) | italic
+                : text(""),
             hbox({
                 msg_input->Render() | flex,
                 send_btn->Render(),
+                has_group ? group_send_btn->Render() : text(""),
             }),
         }) | flex | border;
 
@@ -463,7 +753,7 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         // ── Invite modal overlay ───────────────────────────────────────────────
         if (show_invite_modal) {
             auto modal_doc = vbox({
-                text(" \u2709 Invite Code ") | bold | center | color(Color::Yellow),
+                text(" ✉ Invite Code ") | bold | center | color(Color::Yellow),
                 separator(),
                 text("Share this code with your peer:") | color(Color::GrayLight),
                 separator(),
@@ -485,7 +775,7 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         // ── Join modal overlay ─────────────────────────────────────────────────
         if (show_join_modal) {
             auto modal_doc = vbox({
-                text(" \u21aa Join via Invite Code ") | bold | center | color(Color::Yellow),
+                text(" ↪ Join via Invite Code ") | bold | center | color(Color::Yellow),
                 separator(),
                 text("Type or paste the code from your peer:") | color(Color::GrayLight),
                 separator(),
@@ -506,7 +796,7 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
         // ── Direct connect modal overlay ───────────────────────────────────────
         if (show_direct_modal) {
             auto modal_doc = vbox({
-                text(" \u27a1 Direct Connect ") | bold | center | color(Color::Yellow),
+                text(" ➡ Direct Connect ") | bold | center | color(Color::Yellow),
                 separator(),
                 text("Enter the address shown in their bottom-left panel:")
                     | color(Color::GrayLight),
@@ -528,15 +818,97 @@ cloak::core::Result<void> ChatUi::run_main_loop() {
             return dbox({main_doc | dim, modal_doc});
         }
 
+        // ── Safety number modal overlay ────────────────────────────────────────
+        if (show_safety_modal) {
+            const std::string peer_name =
+                (!peers_snap.empty() && peer_selected < static_cast<int>(peers_snap.size()))
+                    ? peers_snap[peer_selected].name : "current peer";
+            auto modal_doc = vbox({
+                text(" ⚿ Safety Number ") | bold | center | color(Color::Yellow),
+                separator(),
+                text("Compare this number with " + peer_name + " out-of-band.")
+                    | color(Color::GrayLight) | center,
+                text("If it matches, you're talking to the right person.")
+                    | color(Color::GrayLight) | center,
+                separator(),
+                text(safety_line1) | bold | color(Color::Green) | center,
+                text(safety_line2) | bold | color(Color::Green) | center,
+                separator(),
+                text("Verify via phone call, in person, or a separate secure channel.")
+                    | color(Color::GrayDark) | center,
+                separator(),
+                hbox({
+                    verify_peer_btn->Render(),
+                    text("   "),
+                    close_safety_btn->Render(),
+                }) | center,
+                separator(),
+                text("  Mark Verified = you confirmed the number matches")
+                    | color(Color::GrayDark) | center,
+            }) | border | size(WIDTH, EQUAL, 66) | center | clear_under;
+            return dbox({main_doc | dim, modal_doc});
+        }
+
+        // ── Create group modal overlay ─────────────────────────────────────────
+        if (show_group_modal) {
+            auto modal_doc = vbox({
+                text(" [+] Create Group ") | bold | center | color(Color::Magenta),
+                separator(),
+                text("Choose a name for your new encrypted group:") | color(Color::GrayLight),
+                separator(),
+                group_name_input_comp->Render() | border,
+                separator(),
+                hbox({
+                    create_group_confirm_btn->Render(),
+                    text("   "),
+                    cancel_group_btn->Render(),
+                }) | center,
+                separator(),
+                text("  After creating, select a peer and click Invite to Group")
+                    | color(Color::GrayDark) | center,
+                text("  Then use Group Msg to send encrypted messages to all members")
+                    | color(Color::GrayDark) | center,
+            }) | border | size(WIDTH, EQUAL, 62) | center | clear_under;
+            return dbox({main_doc | dim, modal_doc});
+        }
+
+        // ── File send modal overlay ────────────────────────────────────────────
+        if (show_file_modal) {
+            auto modal_doc = vbox({
+                text(" [▶] Send File ") | bold | center | color(Color::Yellow),
+                separator(),
+                text("Enter the full path to the file to send:") | color(Color::GrayLight),
+                separator(),
+                file_path_input_comp->Render() | border,
+                separator(),
+                hbox({
+                    do_send_file_btn->Render(),
+                    text("   "),
+                    cancel_file_btn->Render(),
+                }) | center,
+                separator(),
+                text("  Supported: jpg/png/gif/mp4/mp3/pdf/txt/zip and more")
+                    | color(Color::GrayDark) | center,
+                text("  Received files are saved to your Downloads folder")
+                    | color(Color::GrayDark) | center,
+                text("  Tip: Ctrl+V to paste a path  |  Press Enter or Send File")
+                    | color(Color::GrayDark) | center,
+            }) | border | size(WIDTH, EQUAL, 66) | center | clear_under;
+            return dbox({main_doc | dim, modal_doc});
+        }
+
         return main_doc;
     });
 
     // ── Global key bindings ────────────────────────────────────────────────────
     auto with_keys = CatchEvent(ui, [&](Event e) -> bool {
         if (e == Event::Escape) {
-            if (show_invite_modal) { show_invite_modal = false; active_tab = 0; return true; }
-            if (show_join_modal)   { show_join_modal   = false; active_tab = 0; return true; }
-            if (show_direct_modal) { show_direct_modal = false; active_tab = 0; return true; }
+            if (show_invite_modal)  { show_invite_modal  = false; active_tab = 0; return true; }
+            if (show_join_modal)    { show_join_modal    = false; active_tab = 0; return true; }
+            if (show_direct_modal)  { show_direct_modal  = false; active_tab = 0; return true; }
+            if (show_safety_modal)  { show_safety_modal  = false; active_tab = 0; return true; }
+            if (show_group_modal)   { show_group_modal   = false; active_tab = 0; return true; }
+            if (show_file_modal)    { show_file_modal    = false; active_tab = 0; return true; }
         }
         if (e == Event::Character('\x11')) { // Ctrl+Q
             screen.ExitLoopClosure()();

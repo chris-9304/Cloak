@@ -3,7 +3,7 @@
 ; Run with:  ISCC.exe installer\cloak.iss  (from the project root)
 
 #define AppName      "Cloak"
-#define AppVersion   "0.4.0"
+#define AppVersion   "0.4.1"
 #define AppPublisher "Cloak Project"
 #define AppURL       "https://github.com/chris-9304/cloak"
 #define AppExeName   "cloak.exe"
@@ -70,18 +70,24 @@ Name: "addtopath";   Description: "Add cloak.exe to &PATH (use from any terminal
 Source: "{#DistDir}\cloak.exe";       DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\cloak-relay.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
-; Runtime DLLs — must ship alongside cloak.exe
+; Runtime DLLs
 Source: "{#DistDir}\libsodium.dll";                               DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\boost_program_options-vc143-mt-x64-1_90.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#DistDir}\sqlite3.dll";                                  DestDir: "{app}"; Flags: ignoreversion
+
+; Demo launchers — same folder as cloak.exe so they find it via PATH
+Source: "{#OutputDir}\cloak_demo1.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#OutputDir}\cloak_demo2.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#OutputDir}\run_demo.bat";    DestDir: "{app}"; Flags: ignoreversion
 
 ; Visual C++ 2022 Runtime — extracted to temp, installed silently if missing
 Source: "{#DistDir}\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-; Start Menu — launches cloak.exe in a cmd window so it stays open for user input
+; Start Menu
 Name: "{group}\Cloak";              Filename: "{cmd}"; Parameters: "/k ""{app}\{#AppExeName}"""; WorkingDir: "{app}"; Comment: "End-to-End Encrypted P2P Messenger"
-Name: "{group}\Cloak Relay Server"; Filename: "{cmd}"; Parameters: "/k ""{app}\{#AppRelayExe}"" --port 8765";           WorkingDir: "{app}"; Comment: "Cloak relay server"; Check: FileExists(ExpandConstant('{app}\{#AppRelayExe}'))
+Name: "{group}\Cloak — Run Demo";   Filename: "{app}\run_demo.bat"; WorkingDir: "{app}"; Comment: "Open two-user demo (Alice + Bob on same PC)"
+Name: "{group}\Cloak Relay Server"; Filename: "{cmd}"; Parameters: "/k ""{app}\{#AppRelayExe}"" --port 8765"; WorkingDir: "{app}"; Comment: "Cloak relay server"; Check: FileExists(ExpandConstant('{app}\{#AppRelayExe}'))
 Name: "{group}\Uninstall Cloak";    Filename: "{uninstallexe}"
 
 ; Desktop shortcut (optional task) — same cmd wrapper

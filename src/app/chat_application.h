@@ -86,10 +86,33 @@ public:
 
     // ── Invite / connect ──────────────────────────────────────────────────────
     // Generates the invite code locally (fast) and launches the relay host in
-    // background.  Peer connection fires the peer-change callback.
+    // background.
     cloak::core::Result<std::string> make_invite_code();
     cloak::core::Result<void>        connect_invite(const std::string& code);
     cloak::core::Result<void>        connect_to(const std::string& host, uint16_t port);
+
+    // ── Safety number / verification ─────────────────────────────────────────
+    // Returns the 60-digit safety number for the current peer ("" if no session).
+    std::string               get_safety_number() const;
+    // Marks the current peer as verified in the peer directory.
+    cloak::core::Result<void> verify_current_peer();
+
+    // ── Group chat ──────────────────────────────────────────────────────────
+    struct GroupEntry { std::string name; bool active; };
+    std::vector<GroupEntry>   get_groups() const;
+    cloak::core::Result<void> create_group(const std::string& name);
+    cloak::core::Result<void> switch_group(size_t idx);
+    cloak::core::Result<void> send_group_message(const std::string& text);
+    cloak::core::Result<void> invite_current_peer_to_group();
+    cloak::core::Result<void> leave_group();
+    bool                      has_active_group() const;
+    std::string               active_group_name() const;
+
+    // ── File transfer ──────────────────────────────────────────────────────────
+    using TransferProgress = std::function<void(uint64_t sent, uint64_t total)>;
+    // Sends a file to the current peer.  progress is called from the calling thread.
+    cloak::core::Result<void> send_file_to_current(const std::string& path,
+                                                    TransferProgress   progress = {});
 
     // ── Identity info ─────────────────────────────────────────────────────────
     std::string my_name()         const;
@@ -151,6 +174,12 @@ private:
     // Phase 4: relay / invite commands.
     void cmd_make_invite();
     void cmd_connect_invite(const std::string& code);
+
+    // Inline file receive — called when FileMetadata is detected in a Text message.
+    void handle_incoming_file(std::shared_ptr<std::atomic<bool>> dead_flag,
+                              cloak::session::Session*           session_ptr,
+                              const std::vector<std::byte>&      meta_body,
+                              const std::string&                 sender_name);
 
     // ── Callbacks ─────────────────────────────────────────────────────────────
     mutable std::mutex  cb_mutex_;

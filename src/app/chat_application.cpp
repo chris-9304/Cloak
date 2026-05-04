@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -141,6 +142,12 @@ void ChatApplication::session_recv_func_impl(
         switch (inner_type) {
 
         case cloak::wire::InnerType::Text: {
+            // Detect FileMetadata: first byte == 0x01 (InnerType::FileMetadata tag).
+            if (!body.empty() &&
+                body[0] == static_cast<std::byte>(cloak::wire::InnerType::FileMetadata)) {
+                handle_incoming_file(dead_flag, session_ptr, body, name);
+                break;
+            }
             const std::string text(
                 reinterpret_cast<const char*>(body.data()), body.size());
             fire_message(name, text, false);
@@ -368,21 +375,49 @@ Result<void> ChatApplication::run() {
     if (auto r = Crypto::initialize(); !r) return std::unexpected(r.error());
 
     namespace fs = std::filesystem;
-    char* appdata_ptr = nullptr;
-    size_t appdata_len = 0;
-    _dupenv_s(&appdata_ptr, &appdata_len, "APPDATA");
-    std::string appdata_str = (appdata_ptr ? appdata_ptr : ".");
-    free(appdata_ptr);
 
-    const fs::path app_dir = fs::path(appdata_str) / "Cloak";
+    // ── Data directory (CLOAK_DATA_DIR env var overrides the default) ──────────
+    // Used by demo launchers to keep multiple instances separate.
+    fs::path app_dir;
+    {
+        char* env_data = nullptr; size_t env_data_len = 0;
+        _dupenv_s(&env_data, &env_data_len, "CLOAK_DATA_DIR");
+        if (env_data && *env_data) {
+            app_dir = env_data;
+        } else {
+            char* appdata_ptr = nullptr; size_t appdata_len = 0;
+            _dupenv_s(&appdata_ptr, &appdata_len, "APPDATA");
+            std::string appdata_str = (appdata_ptr ? appdata_ptr : ".");
+            free(appdata_ptr);
+            app_dir = fs::path(appdata_str) / "Cloak";
+        }
+        free(env_data);
+    }
     fs::create_directories(app_dir);
     const auto id_path = app_dir / "identity.bin";
+
+    // ── Passphrase (CLOAK_PASSPHRASE env var skips the interactive prompt) ─────
+    // Intended for demo mode only. Never hard-code in production use.
+    auto prompt_or_env_pass = [](const char* prompt) -> std::string {
+        char* env_pass = nullptr; size_t env_len = 0;
+        _dupenv_s(&env_pass, &env_len, "CLOAK_PASSPHRASE");
+        if (env_pass && *env_pass) {
+            std::string p = env_pass;
+            free(env_pass);
+            std::cout << "[Demo] Using pre-configured passphrase.\n";
+            return p;
+        }
+        free(env_pass);
+        std::string pass;
+        std::cout << prompt << std::flush;
+        std::getline(std::cin, pass);
+        return pass;
+    };
 
     std::string pass;
 
     if (Identity::exists(id_path)) {
-        std::cout << "Passphrase to unlock identity: " << std::flush;
-        std::getline(std::cin, pass);
+        pass = prompt_or_env_pass("Passphrase to unlock identity: ");
 
         auto id_res = Identity::load(
             id_path,
@@ -399,8 +434,7 @@ Result<void> ChatApplication::run() {
         std::cout << "[System] Identity loaded. FP: " << identity_->fingerprint() << "\n";
     } else {
         std::cout << "No identity found. Creating new identity.\n";
-        std::cout << "Choose a passphrase (protect your identity file): " << std::flush;
-        std::getline(std::cin, pass);
+        pass = prompt_or_env_pass("Choose a passphrase (protect your identity file): ");
 
         auto id_res = Identity::generate();
         if (!id_res) {
@@ -865,7 +899,308 @@ cloak::core::Result<void> ChatApplication::connect_to(const std::string& host,
     return {};
 }
 
+// ── Safety number & verification ──────────────────────────────────────────────
+
+std::string ChatApplication::get_safety_number() const {
+    std::lock_guard lock(session_mutex_);
+    if (sessions_.empty() || current_session_idx_ >= sessions_.size() ||
+        sessions_[current_session_idx_].dead->load()) return {};
+    const auto& s  = *sessions_[current_session_idx_].session;
+    const auto  sn = Identity::safety_number(identity_->signing_public(),
+                                              s.peer_signing_key());
+    return sn.digits;
+}
+
+cloak::core::Result<void> ChatApplication::verify_current_peer() {
+    std::lock_guard lock(session_mutex_);
+    if (sessions_.empty() || current_session_idx_ >= sessions_.size() ||
+        sessions_[current_session_idx_].dead->load())
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active session"));
+    const auto fp   = sessions_[current_session_idx_].session->peer_fingerprint();
+    const auto name = sessions_[current_session_idx_].session->peer_display_name();
+    static_cast<void>(peer_dir_.mark_verified(fp));
+    fire_system("[Security] " + name + " marked as verified \u2713");
+    fire_peer_change();
+    return {};
+}
+
+// ── Group chat (public) ───────────────────────────────────────────────────────
+
+std::vector<ChatApplication::GroupEntry> ChatApplication::get_groups() const {
+    std::vector<GroupEntry> result;
+    for (const auto& [gid, gname] : group_mgr_.list_groups()) {
+        bool active = current_group_ && current_group_->bytes == gid.bytes;
+        result.push_back({gname, active});
+    }
+    return result;
+}
+
+cloak::core::Result<void> ChatApplication::create_group(const std::string& name) {
+    if (name.empty())
+        return std::unexpected(Error::from(ErrorCode::TransportError, "Group name required"));
+    auto gid_res = group_mgr_.create_group(name, *identity_);
+    if (!gid_res) return std::unexpected(gid_res.error());
+    current_group_ = *gid_res;
+    if (store_) {
+        auto snap = group_mgr_.snapshot(*gid_res);
+        if (snap) static_cast<void>(store_->save_group(*snap));
+    }
+    fire_system("[Group] '" + name + "' created and active");
+    fire_peer_change();
+    return {};
+}
+
+cloak::core::Result<void> ChatApplication::switch_group(size_t idx) {
+    const auto groups = group_mgr_.list_groups();
+    if (idx >= groups.size())
+        return std::unexpected(Error::from(ErrorCode::TransportError, "Invalid group index"));
+    current_group_ = groups[idx].first;
+    fire_system("[Group] Switched to '" + groups[idx].second + "'");
+    fire_peer_change();
+    return {};
+}
+
+cloak::core::Result<void> ChatApplication::send_group_message(const std::string& text) {
+    if (!current_group_)
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active group"));
+    auto payload_res = group_mgr_.send(*current_group_, text);
+    if (!payload_res) return std::unexpected(payload_res.error());
+    auto enc_res = cloak::wire::encode_group_message(*payload_res);
+    if (!enc_res) return std::unexpected(enc_res.error());
+    std::lock_guard lock(session_mutex_);
+    int cnt = 0;
+    for (auto& entry : sessions_) {
+        if (!entry.dead->load() && entry.session->is_established()) {
+            auto sr = entry.session->send_inner(
+                cloak::wire::InnerType::GroupMessage,
+                std::span<const std::byte>(*enc_res));
+            if (sr) ++cnt;
+        }
+    }
+    if (cnt == 0)
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No live peers in group"));
+    return {};
+}
+
+cloak::core::Result<void> ChatApplication::invite_current_peer_to_group() {
+    if (!current_group_)
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active group"));
+    std::lock_guard lock(session_mutex_);
+    if (sessions_.empty() || current_session_idx_ >= sessions_.size() ||
+        sessions_[current_session_idx_].dead->load())
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active session"));
+    const auto& peer_pub = sessions_[current_session_idx_].session->peer_signing_key();
+    const auto  pname    = sessions_[current_session_idx_].session->peer_display_name();
+    auto op_res = group_mgr_.invite(*current_group_, peer_pub);
+    if (!op_res) return std::unexpected(op_res.error());
+    auto enc_res = cloak::wire::encode_group_op(*op_res);
+    if (!enc_res) return std::unexpected(enc_res.error());
+    auto& s = *sessions_[current_session_idx_].session;
+    auto sr  = s.send_inner(cloak::wire::InnerType::GroupOp,
+                             std::span<const std::byte>(*enc_res));
+    if (!sr) return std::unexpected(sr.error());
+    fire_system("[Group] Invited " + pname + " to group");
+    return {};
+}
+
+cloak::core::Result<void> ChatApplication::leave_group() {
+    if (!current_group_)
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active group"));
+    const cloak::core::GroupId gid = *current_group_;
+    auto op_res = group_mgr_.leave(gid);
+    current_group_.reset();
+    if (store_) static_cast<void>(store_->delete_group(gid));
+    fire_system("[Group] Left group");
+    fire_peer_change();
+    if (!op_res) return {};
+    auto enc_res = cloak::wire::encode_group_op(*op_res);
+    if (!enc_res) return {};
+    std::lock_guard lock(session_mutex_);
+    for (auto& entry : sessions_) {
+        if (!entry.dead->load() && entry.session->is_established())
+            static_cast<void>(entry.session->send_inner(
+                cloak::wire::InnerType::GroupOp,
+                std::span<const std::byte>(*enc_res)));
+    }
+    return {};
+}
+
+bool ChatApplication::has_active_group() const {
+    return current_group_.has_value();
+}
+
+std::string ChatApplication::active_group_name() const {
+    if (!current_group_) return {};
+    for (const auto& [gid, gname] : group_mgr_.list_groups())
+        if (gid.bytes == current_group_->bytes) return gname;
+    return {};
+}
+
+// ── File transfer (public) ────────────────────────────────────────────────────
+
+cloak::core::Result<void> ChatApplication::send_file_to_current(
+    const std::string& path, TransferProgress progress)
+{
+    std::lock_guard lock(session_mutex_);
+    if (sessions_.empty() || current_session_idx_ >= sessions_.size() ||
+        sessions_[current_session_idx_].dead->load())
+        return std::unexpected(Error::from(ErrorCode::TransportError, "No active session"));
+    auto& s = *sessions_[current_session_idx_].session;
+
+    namespace fs = std::filesystem;
+    std::string mime = "application/octet-stream";
+    const auto ext = fs::path(path).extension().string();
+    if      (ext == ".jpg" || ext == ".jpeg") mime = "image/jpeg";
+    else if (ext == ".png")   mime = "image/png";
+    else if (ext == ".gif")   mime = "image/gif";
+    else if (ext == ".mp4")   mime = "video/mp4";
+    else if (ext == ".mp3")   mime = "audio/mpeg";
+    else if (ext == ".pdf")   mime = "application/pdf";
+    else if (ext == ".txt")   mime = "text/plain";
+    else if (ext == ".zip")   mime = "application/zip";
+    else if (ext == ".7z")    mime = "application/x-7z-compressed";
+    else if (ext == ".docx")  mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    auto cb = progress ? progress : [](uint64_t, uint64_t) {};
+    auto fid_res = cloak::transfer::send_file(s, cloak::core::Path(path), mime, cb);
+    if (!fid_res) return std::unexpected(fid_res.error());
+    fire_system("[Transfer] File sent: " + fs::path(path).filename().string());
+    return {};
+}
+
+// ── Inline file receive ───────────────────────────────────────────────────────
+
+void ChatApplication::handle_incoming_file(
+    std::shared_ptr<std::atomic<bool>> dead_flag,
+    cloak::session::Session*           session_ptr,
+    const std::vector<std::byte>&      meta_body,
+    const std::string&                 sender_name)
+{
+    namespace fs = std::filesystem;
+    using namespace cloak::crypto;
+
+    // Layout: [0x01][file_id 16][file_key 32][total_chunks 4 BE][file_size 8 BE]
+    //         [name_len 2 BE][name][mime_len 2 BE][mime]
+    constexpr size_t kMinMeta = 1 + 16 + 32 + 4 + 8 + 2;
+    if (meta_body.size() < kMinMeta) {
+        fire_system("[File] Malformed metadata from " + sender_name + ", ignoring.");
+        return;
+    }
+
+    const auto* d  = reinterpret_cast<const uint8_t*>(meta_body.data());
+    size_t       off = 1; // skip type tag byte
+
+    cloak::core::FileId fid;
+    std::memcpy(fid.bytes.data(), d + off, 16); off += 16;
+
+    SecureBuffer<32> file_key;
+    std::memcpy(file_key.data(), d + off, 32); off += 32;
+
+    const uint32_t total_chunks =
+        (uint32_t(d[off+0]) << 24) | (uint32_t(d[off+1]) << 16) |
+        (uint32_t(d[off+2]) <<  8) |  uint32_t(d[off+3]);
+    off += 4;
+
+    uint64_t file_size = 0;
+    for (int i = 0; i < 8; ++i) file_size = (file_size << 8) | d[off + i];
+    off += 8;
+
+    if (off + 2 > meta_body.size()) { fire_system("[File] Metadata truncated."); return; }
+    const uint16_t name_len = (uint16_t(d[off]) << 8) | d[off + 1]; off += 2;
+    if (off + name_len > meta_body.size()) { fire_system("[File] Filename truncated."); return; }
+    std::string file_name(reinterpret_cast<const char*>(d + off), name_len);
+    file_name = fs::path(file_name).filename().string();
+    if (file_name.empty()) file_name = "received_file";
+
+    // Save to the user's Downloads folder (USERPROFILE\Downloads).
+    fs::path save_dir;
+    {
+        char* up = nullptr; size_t up_len = 0;
+        _dupenv_s(&up, &up_len, "USERPROFILE");
+        save_dir = up ? fs::path(up) / "Downloads" : fs::path(".");
+        free(up);
+        std::error_code ec;
+        fs::create_directories(save_dir, ec);
+    }
+
+    // Avoid overwriting an existing file with the same name.
+    fs::path save_path = save_dir / file_name;
+    if (fs::exists(save_path)) {
+        const auto stem = fs::path(file_name).stem().string();
+        const auto ext  = fs::path(file_name).extension().string();
+        for (int n = 1; fs::exists(save_path); ++n)
+            save_path = save_dir / (stem + "_" + std::to_string(n) + ext);
+    }
+
+    std::ofstream out(save_path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        fire_system("[File] Cannot create output file: " + save_path.string());
+        return;
+    }
+
+    fire_system("[File] Receiving '" + file_name + "' from " + sender_name + "...");
+
+    uint64_t bytes_received = 0;
+    for (uint32_t idx = 0; idx < total_chunks || total_chunks == 0; ++idx) {
+        if (dead_flag->load()) {
+            fire_system("[File] Transfer aborted (session closed).");
+            return;
+        }
+
+        // Each chunk is a Text message whose body is an encoded FileChunk frame.
+        auto raw_res = session_ptr->recv_message();
+        if (!raw_res) {
+            dead_flag->store(true);
+            fire_system("[File] Transfer failed: " + raw_res.error().message);
+            return;
+        }
+        auto [inner_type2, chunk_body] = std::move(*raw_res);
+
+        auto frame_res = cloak::wire::decode(
+            std::span<const std::byte>(chunk_body));
+        if (!frame_res || frame_res->type != cloak::wire::MessageType::FileChunk) {
+            fire_system("[File] Expected FileChunk frame, got unexpected message.");
+            return;
+        }
+
+        auto cp_res = cloak::wire::decode_file_chunk(
+            std::span<const std::byte>(frame_res->payload));
+        if (!cp_res) { fire_system("[File] Chunk decode failed."); return; }
+        auto& cp = *cp_res;
+
+        if (cp.file_id.bytes != fid.bytes) {
+            fire_system("[File] FileId mismatch in chunk."); return;
+        }
+
+        auto nonce_res = cloak::transfer::chunk_nonce(file_key, cp.chunk_idx);
+        if (!nonce_res) { fire_system("[File] Nonce derivation failed."); return; }
+
+        auto pt_res = Crypto::aead_decrypt(
+            file_key,
+            std::span<const std::byte>(*nonce_res),
+            std::span<const std::byte>(
+                reinterpret_cast<const std::byte*>(fid.bytes.data()), 16),
+            std::span<const std::byte>(cp.data));
+        if (!pt_res) { fire_system("[File] Chunk decryption failed."); return; }
+
+        out.write(reinterpret_cast<const char*>(pt_res->data()),
+                  static_cast<std::streamsize>(pt_res->size()));
+        bytes_received += pt_res->size();
+
+        if (cp.is_last) break;
+    }
+    out.close();
+
+    const std::string final_name = save_path.filename().string();
+    fire_system("[File] ✓ '" + final_name + "' received (" +
+                std::to_string(bytes_received) + " bytes) — saved to Downloads");
+    fire_message(sender_name,
+                 "[File received: " + final_name + " — saved to Downloads]",
+                 false);
+}
+
 // ── Command dispatch ──────────────────────────────────────────────────────────
+
 
 void ChatApplication::print_help() const {
     std::cout <<
