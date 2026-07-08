@@ -1,4 +1,4 @@
-# EncryptiV
+# Encrypted-Chat-Service
 
 > **👉 STOP HERE: Check out [docs/DEMO.md](docs/DEMO.md) for the fast-track CLI guide mapping out the precise architecture demo!**
 
