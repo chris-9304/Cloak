@@ -1,9 +1,11 @@
 #include <cloak/relay/relay_server.h>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#endif
 
 #include <boost/asio.hpp>
 #include <array>

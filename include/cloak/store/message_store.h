@@ -31,9 +31,12 @@ public:
         const cloak::core::Path&                path,
         const cloak::crypto::SecureBuffer<32>&  db_key);
 
-    // Move-only (owns the sqlite3* handle).
-    MessageStore(MessageStore&&)            = default;
-    MessageStore& operator=(MessageStore&&) = default;
+    // Move-only (owns the sqlite3* handle). Hand-written: db_ is a raw
+    // pointer, so a defaulted move would leave the source still pointing
+    // at the same handle, and its destructor would close it out from
+    // under the moved-to object.
+    MessageStore(MessageStore&& o) noexcept;
+    MessageStore& operator=(MessageStore&& o) noexcept;
     MessageStore(const MessageStore&)            = delete;
     MessageStore& operator=(const MessageStore&) = delete;
     ~MessageStore();

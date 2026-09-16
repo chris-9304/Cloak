@@ -10,5 +10,5 @@ cloak_add_library(
         wire
         transport
         sodium
-        ws2_32
+        $<$<PLATFORM_ID:Windows>:ws2_32>
 )

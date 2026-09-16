@@ -1,9 +1,14 @@
 #include <cloak/relay/relay_server.h>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <csignal>
+#include <cstdlib>
+#endif
 #include <boost/program_options.hpp>
 #include <iostream>
 #include <memory>
@@ -12,6 +17,7 @@ namespace po = boost::program_options;
 
 static std::unique_ptr<cloak::relay::RelayServer> g_relay;
 
+#if defined(_WIN32)
 BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
     if (fdwCtrlType == CTRL_C_EVENT || fdwCtrlType == CTRL_CLOSE_EVENT) {
         std::cout << "\n[cloak-relay] Shutting down.\n";
@@ -20,10 +26,22 @@ BOOL WINAPI CtrlHandler(DWORD fdwCtrlType) {
     }
     return FALSE;
 }
+#else
+void CtrlHandler(int) {
+    std::cout << "\n[cloak-relay] Shutting down.\n";
+    if (g_relay) g_relay->stop();
+    std::exit(0);
+}
+#endif
 
 int main(int argc, char** argv) {
+#if defined(_WIN32)
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCtrlHandler(CtrlHandler, TRUE);
+#else
+    std::signal(SIGINT, CtrlHandler);
+    std::signal(SIGTERM, CtrlHandler);
+#endif
 
     po::options_description desc("cloak-relay options");
     desc.add_options()

@@ -2,10 +2,14 @@
 #include <cloak/crypto/crypto.h>
 #include <cloak/wire/framing.h>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 #include <array>
 #include <cstring>

@@ -124,6 +124,157 @@ See [WINDOWS_BUILD.md](WINDOWS_BUILD.md) for the full setup guide.
 
 ---
 
+## Build & Run on macOS / Linux
+
+Cloak was originally MSVC/Windows-only (ADR-0002). It now also builds natively on
+macOS/Linux with Clang or GCC, targeting just the relay server and the underlying
+libraries — see "Scope" below.
+
+### Prerequisites
+
+```bash
+# macOS (Homebrew)
+brew install cmake ninja pkg-config autoconf automake autoconf-archive libtool
+
+# Debian/Ubuntu
+sudo apt install cmake ninja-build pkg-config autoconf autoconf-archive automake libtool
+```
+
+You also need [vcpkg](https://github.com/microsoft/vcpkg) for dependencies (libsodium,
+Boost, spdlog, fmt, sqlite3, Catch2):
+
+```bash
+git clone https://github.com/microsoft/vcpkg ~/vcpkg
+cd ~/vcpkg && ./bootstrap-vcpkg.sh
+export VCPKG_ROOT=$HOME/vcpkg   # add this to your shell profile
+```
+
+### Build & test
+
+```bash
+cmake --preset debug-posix                          # configure (first run builds
+                                                     # vcpkg deps from source, ~15-30 min)
+cmake --build --preset debug-posix                  # build
+ctest --preset debug-posix --output-on-failure       # run tests
+```
+
+Use `release-posix` instead of `debug-posix` for an optimized build.
+
+### Run the relay server
+
+```bash
+./build/debug-posix/src/relay/cloak-relay --port 8765
+```
+
+### Scope (macOS/Linux)
+
+Only `cloak-relay` and the library modules it depends on (`core`, `crypto`, `identity`,
+`wire`, `store`, `transport`, `session`, `transfer`, `group`) build in this
+configuration. `ui` (the FTXUI terminal client), `app` (the top-level orchestrator),
+and `discovery` (Win32 mDNS LAN discovery) are **not** built — per this project's own
+in-progress plan, the interactive desktop client is being replaced by a Rust server +
+Android app, so there is currently no terminal chat client on macOS/Linux, only the
+relay.
+
+### Known issue: group chat
+
+`test_group`'s "GroupManager create, invite, send, recv" test fails on every platform
+(pre-existing, not introduced by this port): the `Invite` wire payload
+(`GroupOpPayload`) never carries the sender's own per-group Sender-Key public key
+(`GroupSession::own_sign_pub_`, generated fresh per group — unrelated to the peer's
+identity key). `GroupManager::accept_invite` currently registers the inviter under
+`inviter_signing_pub` (the *identity* key), which never matches the `sender_sign_pub`
+embedded in that peer's actual group messages, so `GroupSession::decrypt` can never
+find the sender and always fails with "Unknown group member sender key". Fixing this
+needs a wire-format change (adding the sender's per-group public key to the `Invite`/
+`Create` payload) — out of scope for this build-portability pass; flagging for a
+separate fix.
+
+### What changed to make this build natively on macOS/Linux
+
+- **`src/crypto/secure_buffer.h`** (+ its `include/cloak/crypto/` mirror): `mlock`/
+  `munlock` and a manual volatile zero replace `VirtualLock`/`VirtualUnlock`/
+  `SecureZeroMemory`, guarded by `#ifdef _WIN32` so the Windows path is untouched.
+- **`src/relay/relay_main.cpp`**: POSIX `signal(SIGINT/SIGTERM, ...)` replaces
+  `SetConsoleCtrlHandler` for Ctrl+C shutdown.
+- **`src/relay/relay_server.cpp`**: the `winsock2.h` include (unneeded — networking
+  is all `boost::asio`) is now Windows-only.
+- **`src/wire/framing.cpp`, `src/session/session.cpp`**: `winsock2.h`/`htonl`/
+  `_byteswap_uint64` (MSVC intrinsic) replaced with `<arpa/inet.h>` and C++23
+  `std::byteswap` (`<bit>`), used on both platforms.
+- **`src/transport/CMakeLists.txt`, `src/wire/CMakeLists.txt`,
+  `src/relay/CMakeLists.txt`, `src/session/CMakeLists.txt`**: `ws2_32` linking made
+  Windows-only via `$<$<PLATFORM_ID:Windows>:ws2_32>`.
+- **`vcpkg.json`, `CMakeLists.txt`**: dropped `wil` (unused anywhere in the codebase)
+  and `ftxui` (already unused after the `ui` module was dropped) as Windows-only
+  dependencies.
+- **`cmake/msvc_options.cmake`, `cmake/warnings.cmake`**: compiler flags branched —
+  MSVC flags (`/W4`, `/utf-8`, etc.) only apply under MSVC; Clang/GCC get
+  `-Wall -Wextra -Werror`.
+- **`CMakeLists.txt`**: the old `if(NOT MSVC OR NOT CMAKE_SYSTEM_NAME STREQUAL
+  "Windows") message(FATAL_ERROR ...)` gate now only requires MSVC when actually
+  targeting Windows.
+- **`CMakePresets.json`**: added `debug-posix`/`release-posix` presets alongside the
+  existing Windows ones.
+- Restored ~24 `include/cloak/*.h` public headers (`core`, `crypto`, `group`,
+  `identity`, `relay`, `session`, `store`, `transfer`, `transport`, `wire`) that had
+  gone missing from the working copy — active modules still required them to
+  compile, so this wasn't part of the intentional `ui`/`app`/`discovery` removal.
+- **`src/identity/identity.cpp`**: fixed a constructor member-initializer-order bug
+  (unrelated to Windows, just caught by stricter Clang warnings).
+- **`src/store/message_store.cpp`, `src/wire/framing.cpp`**: a few genuinely-unused
+  static helpers marked `[[maybe_unused]]`.
+- **`src/store/message_store.cpp`/`.h`** (+ `include/cloak/store/` mirror): fixed a
+  real bug — `MessageStore`'s defaulted move constructor copied the raw `sqlite3*`
+  handle without nulling the source, so a temporary produced during return-by-value /
+  `std::expected` construction would close the handle in its destructor while the
+  live object still held the same pointer, causing `SQLITE_MISUSE` on every
+  `save_message`/`save_group` call. Replaced with a hand-written move
+  constructor/assignment operator.
+
+Verified on Apple Silicon (arm64) with Clang/libc++, Debug config, for the full library
++ test suite. `cloak-relay` specifically is also now verified on Linux (GCC 12, arm64,
+via the container below) — the rest of the library stack (crypto/identity/session/
+store/etc.) hasn't been exercised on Linux directly, but should work unchanged since
+every portability fix above uses portable POSIX APIs (`mlock`, POSIX signals,
+`<arpa/inet.h>`, `std::byteswap`) with nothing macOS-specific.
+
+---
+
+## Run cloak-relay in a container
+
+Only `cloak-relay` (plus `core`, its one dependency) is containerized — there's no
+terminal UI client build in this configuration (see "Build & Run on macOS / Linux"
+above for why `ui`/`app` aren't built at all right now). This is the relay server only;
+run the actual Cloak client natively.
+
+**Prerequisites:** Docker, Podman, or OrbStack. (Podman needs a machine provisioned —
+`podman machine init && podman machine start` — before its CLI works; OrbStack and
+Docker Desktop both ship a `docker`-compatible CLI directly.)
+
+```bash
+# Build
+docker build -t cloak-relay -f Containerfile .
+
+# Run on the default port (8765), mapped to the host
+docker run --rm -p 8765:8765 cloak-relay
+
+# Or on a different port -- pass args after the image name, they replace the
+# Containerfile's default CMD (["--port", "8765"])
+docker run --rm -p 443:443 cloak-relay --port 443
+```
+
+(Substitute `podman` for `docker` if using a provisioned Podman machine — the commands
+are otherwise identical.)
+
+First build clones and bootstraps vcpkg fresh inside the image and builds `core` +
+`relay` from source (a couple of minutes — `cloak-relay` itself has a much smaller
+dependency footprint than the full library, since `relay_server.cpp` only needs
+`boost::asio` and `core`'s shared types). Subsequent builds reuse Docker's layer cache
+as long as `CMakeLists.txt`/`vcpkg.json`/`src/`/`include/` haven't changed.
+
+---
+
 ## Security
 
 Cloak uses:

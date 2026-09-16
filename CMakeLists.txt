@@ -2,9 +2,10 @@ cmake_minimum_required(VERSION 3.25)
 
 project(Cloak LANGUAGES CXX C)
 
-# MSVC is set only after project() declares the languages.
-if(NOT MSVC OR NOT CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    message(FATAL_ERROR "Cloak targets MSVC on Windows exclusively. See WINDOWS_BUILD.md.")
+# ADR-0002 originally pinned Cloak to MSVC/Windows exclusively (see WINDOWS_BUILD.md).
+# Native macOS/Linux builds (Clang/GCC) are also supported now; MSVC remains required on Windows.
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT MSVC)
+    message(FATAL_ERROR "On Windows, Cloak requires MSVC. See WINDOWS_BUILD.md.")
 endif()
 
 set(CMAKE_CXX_STANDARD 23)
@@ -40,8 +41,7 @@ find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(spdlog          CONFIG REQUIRED)
 find_package(fmt             CONFIG REQUIRED)
 find_package(Catch2          CONFIG REQUIRED)
-find_package(ftxui           CONFIG REQUIRED)
-find_package(wil             CONFIG REQUIRED)
+# ftxui, wil removed: terminal UI replaced by Android app; wil was unused
 # protobuf: available but not yet used in Phase 2 (wire format is hand-rolled)
 # find_package(protobuf CONFIG REQUIRED)
 
@@ -56,12 +56,10 @@ add_subdirectory(src/wire)
 add_subdirectory(src/store)
 add_subdirectory(src/transport)
 add_subdirectory(src/session)
-add_subdirectory(src/discovery)
+# discovery, ui, app removed: replaced by Rust server + Android app
 add_subdirectory(src/transfer)
 add_subdirectory(src/group)
 add_subdirectory(src/relay)
-add_subdirectory(src/ui)
-add_subdirectory(src/app)
 
 # Installer placeholder
 add_custom_target(installer

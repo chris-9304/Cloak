@@ -4,5 +4,5 @@ cloak_add_library(
         framing.cpp
     DEPS
         core
-        ws2_32
+        $<$<PLATFORM_ID:Windows>:ws2_32>
 )

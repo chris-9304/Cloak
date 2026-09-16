@@ -33,7 +33,7 @@ Result<void> exec(sqlite3* db, const char* sql) {
     return {};
 }
 
-Timestamp ms_to_ts(int64_t ms) {
+[[maybe_unused]] Timestamp ms_to_ts(int64_t ms) {
     return Timestamp(std::chrono::milliseconds(ms));
 }
 
@@ -47,6 +47,22 @@ int64_t ts_to_ms(const Timestamp& ts) {
 
 MessageStore::MessageStore(sqlite3* db, SecureBuffer<32> key)
     : db_(db), db_key_(std::move(key)) {}
+
+MessageStore::MessageStore(MessageStore&& o) noexcept
+    : db_(o.db_), db_key_(std::move(o.db_key_)), mu_(std::move(o.mu_)) {
+    o.db_ = nullptr;
+}
+
+MessageStore& MessageStore::operator=(MessageStore&& o) noexcept {
+    if (this != &o) {
+        if (db_) sqlite3_close(db_);
+        db_      = o.db_;
+        db_key_  = std::move(o.db_key_);
+        mu_      = std::move(o.mu_);
+        o.db_    = nullptr;
+    }
+    return *this;
+}
 
 MessageStore::~MessageStore() {
     if (db_) {

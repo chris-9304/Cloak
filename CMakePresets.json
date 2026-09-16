@@ -19,6 +19,18 @@
             }
         },
         {
+            "name": "base-posix",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+            "condition": {
+                "type": "notEquals",
+                "lhs": "${hostSystemName}",
+                "rhs": "Windows"
+            }
+        },
+        {
             "name": "debug",
             "displayName": "Debug",
             "inherits": "base",
@@ -30,6 +42,22 @@
             "name": "release",
             "displayName": "Release",
             "inherits": "base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "debug-posix",
+            "displayName": "Debug (macOS/Linux)",
+            "inherits": "base-posix",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "release-posix",
+            "displayName": "Release (macOS/Linux)",
+            "inherits": "base-posix",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
@@ -61,6 +89,14 @@
             "configurePreset": "release"
         },
         {
+            "name": "debug-posix",
+            "configurePreset": "debug-posix"
+        },
+        {
+            "name": "release-posix",
+            "configurePreset": "release-posix"
+        },
+        {
             "name": "asan",
             "configurePreset": "asan"
         },
@@ -83,6 +119,16 @@
         {
             "name": "asan",
             "configurePreset": "asan",
+            "output": {"outputOnFailure": true}
+        },
+        {
+            "name": "debug-posix",
+            "configurePreset": "debug-posix",
+            "output": {"outputOnFailure": true}
+        },
+        {
+            "name": "release-posix",
+            "configurePreset": "release-posix",
             "output": {"outputOnFailure": true}
         }
     ]

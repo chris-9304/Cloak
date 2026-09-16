@@ -7,5 +7,5 @@ cloak_add_library(
     DEPS
         core
         Boost::boost
-        ws2_32
+        $<$<PLATFORM_ID:Windows>:ws2_32>
 )

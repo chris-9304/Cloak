@@ -1,10 +1,15 @@
 #include <cloak/wire/framing.h>
 
+#if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#endif
 
+#include <bit>
 #include <cstring>
 
 namespace cloak::wire {
@@ -97,8 +102,8 @@ void push_u32_be(std::vector<std::byte>& v, uint32_t x) {
     v.insert(v.end(), p, p + 4);
 }
 
-void push_u64_be(std::vector<std::byte>& v, uint64_t x) {
-    const uint64_t be = _byteswap_uint64(x);
+[[maybe_unused]] void push_u64_be(std::vector<std::byte>& v, uint64_t x) {
+    const uint64_t be = std::byteswap(x);
     const auto* p = reinterpret_cast<const std::byte*>(&be);
     v.insert(v.end(), p, p + 8);
 }
@@ -115,10 +120,10 @@ uint32_t read_u32_be(std::span<const std::byte> bytes, size_t off) {
     return ntohl(be);
 }
 
-uint64_t read_u64_be(std::span<const std::byte> bytes, size_t off) {
+[[maybe_unused]] uint64_t read_u64_be(std::span<const std::byte> bytes, size_t off) {
     uint64_t be{};
     std::memcpy(&be, bytes.data() + off, 8);
-    return _byteswap_uint64(be);
+    return std::byteswap(be);
 }
 
 void push_bytes(std::vector<std::byte>& v,

@@ -36,8 +36,8 @@ static constexpr size_t   kArgonMem  = crypto_pwhash_MEMLIMIT_INTERACTIVE;
 
 Identity::Identity(SecureBuffer<64> s_sk, PublicKey s_pk,
                    SecureBuffer<32> k_sk, PublicKey k_pk)
-    : signing_sk_(std::move(s_sk)), signing_pk_(s_pk),
-      kx_sk_(std::move(k_sk)), kx_pk_(k_pk) {}
+    : signing_sk_(std::move(s_sk)), kx_sk_(std::move(k_sk)),
+      signing_pk_(s_pk), kx_pk_(k_pk) {}
 
 // ── Generate ──────────────────────────────────────────────────────────────────
 
