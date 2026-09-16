@@ -173,6 +173,7 @@ TEST_CASE("GroupOp wire encode/decode round-trip", "[group][wire]") {
     op.op         = GroupOpType::Invite;
     op.group_name = "InviteTest";
     op.member_key.bytes.fill(0xAB);
+    op.sender_sign_pub.bytes.fill(0xEF);
     op.chain_key.fill(0xCD);
     op.chain_counter = 42;
     op.group_id.bytes.fill(0x11);
@@ -189,6 +190,7 @@ TEST_CASE("GroupOp wire encode/decode round-trip", "[group][wire]") {
     CHECK(decoded->chain_counter == 42);
     CHECK(decoded->chain_key == op.chain_key);
     CHECK(decoded->member_key.bytes == op.member_key.bytes);
+    CHECK(decoded->sender_sign_pub.bytes == op.sender_sign_pub.bytes);
 }
 
 // ── GroupManager integration test ─────────────────────────────────────────────

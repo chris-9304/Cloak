@@ -82,10 +82,11 @@ TEST_CASE("Wire GroupMessage round-trip", "[wire][group]") {
 
 TEST_CASE("Wire GroupOp round-trip", "[wire][group]") {
     cloak::wire::GroupOpPayload op;
-    op.op           = cloak::wire::GroupOpType::Leave;
+    op.op           = cloak::wire::GroupOpType::Invite;
     op.group_id.bytes.fill(0x55);
     op.group_name   = "TestGroup";
     op.member_key.bytes.fill(0x66);
+    op.sender_sign_pub.bytes.fill(0x88);
     op.chain_key.fill(0x77);
     op.chain_counter = 7;
 
@@ -94,9 +95,12 @@ TEST_CASE("Wire GroupOp round-trip", "[wire][group]") {
 
     auto dec = cloak::wire::decode_group_op(std::span<const std::byte>(*enc));
     REQUIRE(dec.has_value());
-    CHECK(dec->op           == cloak::wire::GroupOpType::Leave);
-    CHECK(dec->group_name   == "TestGroup");
-    CHECK(dec->chain_counter == 7u);
+    CHECK(dec->op              == cloak::wire::GroupOpType::Invite);
+    CHECK(dec->group_name      == "TestGroup");
+    CHECK(dec->member_key.bytes      == op.member_key.bytes);
+    CHECK(dec->sender_sign_pub.bytes == op.sender_sign_pub.bytes);
+    CHECK(dec->chain_key             == op.chain_key);
+    CHECK(dec->chain_counter   == 7u);
 }
 
 TEST_CASE("Wire AppMessage payload round-trip", "[wire]") {

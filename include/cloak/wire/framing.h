@@ -186,6 +186,10 @@ struct GroupMessagePayload {
 //   group_name_len     [2 BE]
 //   group_name         [...]  (only in Create/Invite ops)
 //   member_key         [32]   affected member signing pub (Invite/Kick/Leave)
+//   sender_sign_pub    [32]   sender's own per-group Sender-Key pub (Invite/Create only,
+//                              zero otherwise) -- lets the recipient register the sender
+//                              under the key that actually appears in their messages
+//                              (GroupSession::own_sign_pub_), distinct from member_key
 //   chain_key          [32]   sender's current chain key (Invite only)
 //   chain_key_counter  [4 BE] sender's current chain counter (Invite only)
 
@@ -201,6 +205,7 @@ struct GroupOpPayload {
     cloak::core::GroupId   group_id;
     std::string         group_name;       // filled for Create and Invite ops
     cloak::core::PublicKey member_key;       // signing pub of affected member
+    cloak::core::PublicKey sender_sign_pub{}; // sender's own Sender-Key pub (Invite/Create only)
     std::array<uint8_t, 32> chain_key{}; // sender's chain key (Invite only)
     uint32_t            chain_counter{0}; // sender's chain counter (Invite only)
 };

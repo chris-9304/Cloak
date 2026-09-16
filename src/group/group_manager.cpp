@@ -37,9 +37,15 @@ Result<void> GroupManager::accept_invite(
                 reinterpret_cast<std::byte*>(ck.data()), 32));
         if (!ck_res) return std::unexpected(ck_res.error());
 
-        // Inviter's member state.
+        // Inviter's member state, keyed by their per-group Sender-Key public key
+        // (op.sender_sign_pub) -- this is the key that actually appears in the
+        // inviter's messages (GroupSession::own_sign_pub_), not their identity key.
+        // inviter_signing_pub is the identity the transport layer already verified
+        // this op came from; kept for the caller's own bookkeeping/verification, not
+        // used to key group membership.
+        static_cast<void>(inviter_signing_pub);
         MemberState inviter_ms;
-        inviter_ms.signing_pub = inviter_signing_pub;
+        inviter_ms.signing_pub = op.sender_sign_pub;
         std::memcpy(inviter_ms.chain_key.data(), op.chain_key.data(), 32);
         inviter_ms.counter = op.chain_counter;
 

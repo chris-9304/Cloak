@@ -467,6 +467,7 @@ cloak::core::Result<GroupMessagePayload> decode_group_message(
 // group_name_len    [2 BE]
 // group_name        [name_len]
 // member_key        [32]   affected member signing pub
+// sender_sign_pub   [32]   sender's own Sender-Key pub (Invite/Create, zero otherwise)
 // chain_key         [32]   sender chain key (Invite only, zero otherwise)
 // chain_counter     [4 BE]
 
@@ -480,13 +481,14 @@ cloak::core::Result<std::vector<std::byte>> encode_group_op(
     }
 
     std::vector<std::byte> out;
-    out.reserve(1 + 16 + 2 + g.group_name.size() + 32 + 32 + 4);
+    out.reserve(1 + 16 + 2 + g.group_name.size() + 32 + 32 + 32 + 4);
 
     out.push_back(static_cast<std::byte>(g.op));
     push_bytes(out, g.group_id.bytes.data(), 16);
     push_u16_be(out, static_cast<uint16_t>(g.group_name.size()));
     push_bytes(out, g.group_name);
     push_bytes(out, g.member_key.bytes.data(), 32);
+    push_bytes(out, g.sender_sign_pub.bytes.data(), 32);
     push_bytes(out, g.chain_key.data(), 32);
     push_u32_be(out, g.chain_counter);
 
@@ -496,7 +498,7 @@ cloak::core::Result<std::vector<std::byte>> encode_group_op(
 cloak::core::Result<GroupOpPayload> decode_group_op(
     std::span<const std::byte> bytes) {
 
-    constexpr size_t kMin = 1 + 16 + 2 + 32 + 32 + 4; // no name
+    constexpr size_t kMin = 1 + 16 + 2 + 32 + 32 + 32 + 4; // no name
     if (bytes.size() < kMin) {
         return std::unexpected(cloak::core::Error::from(
             cloak::core::ErrorCode::FramingError,
@@ -515,7 +517,7 @@ cloak::core::Result<GroupOpPayload> decode_group_op(
             cloak::core::ErrorCode::FramingError,
             "Group name too long"));
     }
-    if (bytes.size() < off + name_len + 32 + 32 + 4) {
+    if (bytes.size() < off + name_len + 32 + 32 + 32 + 4) {
         return std::unexpected(cloak::core::Error::from(
             cloak::core::ErrorCode::FramingError,
             "GroupOp payload truncated"));
@@ -525,8 +527,9 @@ cloak::core::Result<GroupOpPayload> decode_group_op(
         reinterpret_cast<const char*>(bytes.data() + off), name_len);
     off += name_len;
 
-    std::memcpy(g.member_key.bytes.data(), bytes.data() + off, 32); off += 32;
-    std::memcpy(g.chain_key.data(),        bytes.data() + off, 32); off += 32;
+    std::memcpy(g.member_key.bytes.data(),      bytes.data() + off, 32); off += 32;
+    std::memcpy(g.sender_sign_pub.bytes.data(), bytes.data() + off, 32); off += 32;
+    std::memcpy(g.chain_key.data(),             bytes.data() + off, 32); off += 32;
     g.chain_counter = read_u32_be(bytes, off);
 
     return g;

@@ -141,6 +141,7 @@ Result<GroupOpPayload> GroupSession::make_create_op(
     op.group_id   = group_id_;
     op.group_name = group_name_;
     op.member_key = invitee_signing_pub;
+    op.sender_sign_pub = own_sign_pub_;
     std::memcpy(op.chain_key.data(), own_chain_key_.data(), 32);
     op.chain_counter = own_counter_;
     return op;
@@ -154,6 +155,7 @@ Result<GroupOpPayload> GroupSession::make_invite_op(
     op.group_id   = group_id_;
     op.group_name = group_name_;
     op.member_key = invitee_signing_pub;
+    op.sender_sign_pub = own_sign_pub_;
     std::memcpy(op.chain_key.data(), own_chain_key_.data(), 32);
     op.chain_counter = own_counter_;
     return op;
@@ -179,14 +181,18 @@ Result<void> GroupSession::apply_op(const GroupOpPayload& op) {
     switch (op.op) {
     case GroupOpType::Create:
     case GroupOpType::Invite: {
-        // Register sender's chain key.
-        auto* existing = find_member(op.member_key);
+        // Register the SENDER's chain key (op.sender_sign_pub), not op.member_key --
+        // member_key names who the sender is inviting, which is a different person
+        // than whoever actually sent this op. This matches what decrypt() looks up
+        // senders by (GroupSession::own_sign_pub_, embedded in every message the
+        // sender encrypts).
+        auto* existing = find_member(op.sender_sign_pub);
         if (existing) {
             std::memcpy(existing->chain_key.data(), op.chain_key.data(), 32);
             existing->counter = op.chain_counter;
         } else {
             MemberState ms;
-            ms.signing_pub = op.member_key;
+            ms.signing_pub = op.sender_sign_pub;
             std::memcpy(ms.chain_key.data(), op.chain_key.data(), 32);
             ms.counter = op.chain_counter;
             members_.push_back(std::move(ms));
