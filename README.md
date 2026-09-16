@@ -176,20 +176,6 @@ in-progress plan, the interactive desktop client is being replaced by a Rust ser
 Android app, so there is currently no terminal chat client on macOS/Linux, only the
 relay.
 
-### Known issue: group chat
-
-`test_group`'s "GroupManager create, invite, send, recv" test fails on every platform
-(pre-existing, not introduced by this port): the `Invite` wire payload
-(`GroupOpPayload`) never carries the sender's own per-group Sender-Key public key
-(`GroupSession::own_sign_pub_`, generated fresh per group — unrelated to the peer's
-identity key). `GroupManager::accept_invite` currently registers the inviter under
-`inviter_signing_pub` (the *identity* key), which never matches the `sender_sign_pub`
-embedded in that peer's actual group messages, so `GroupSession::decrypt` can never
-find the sender and always fails with "Unknown group member sender key". Fixing this
-needs a wire-format change (adding the sender's per-group public key to the `Invite`/
-`Create` payload) — out of scope for this build-portability pass; flagging for a
-separate fix.
-
 ### What changed to make this build natively on macOS/Linux
 
 - **`src/crypto/secure_buffer.h`** (+ its `include/cloak/crypto/` mirror): `mlock`/
@@ -231,13 +217,20 @@ separate fix.
   live object still held the same pointer, causing `SQLITE_MISUSE` on every
   `save_message`/`save_group` call. Replaced with a hand-written move
   constructor/assignment operator.
+- **`src/wire/framing.h`/`.cpp`** (+ `include/cloak/wire/` mirror), **`src/group/
+  group_session.cpp`**, **`src/group/group_manager.cpp`**: fixed a real group-chat bug
+  — `GroupOpPayload`'s Invite/Create ops never transmitted the sender's own per-group
+  Sender-Key public key, so group message decryption always failed with "Unknown group
+  member sender key" (`test_group` reproduced this on every platform, not just macOS).
+  Added a `sender_sign_pub` field to the wire format and fixed member registration to
+  use it. All 9/9 test suites pass now.
 
-Verified on Apple Silicon (arm64) with Clang/libc++, Debug config, for the full library
-+ test suite. `cloak-relay` specifically is also now verified on Linux (GCC 12, arm64,
-via the container below) — the rest of the library stack (crypto/identity/session/
-store/etc.) hasn't been exercised on Linux directly, but should work unchanged since
-every portability fix above uses portable POSIX APIs (`mlock`, POSIX signals,
-`<arpa/inet.h>`, `std::byteswap`) with nothing macOS-specific.
+Verified on Apple Silicon (arm64) with Clang/libc++, Debug and Release configs, for the
+full library + test suite (9/9 suites pass). `cloak-relay` specifically is also verified
+on Linux (GCC 12, arm64, via the container below) — the rest of the library stack
+(crypto/identity/session/store/etc.) hasn't been exercised on Linux directly, but should
+work unchanged since every portability fix above uses portable POSIX APIs (`mlock`,
+POSIX signals, `<arpa/inet.h>`, `std::byteswap`) with nothing macOS-specific.
 
 ---
 

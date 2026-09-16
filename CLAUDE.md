@@ -56,11 +56,12 @@ LAN text chat. Phase 2: Double Ratchet, file transfer, receipts. Phase 3: Sender
 group chat, multi-device via device certs, group/peer persistence. Phase 4: Internet
 relay transport, invite-code peer discovery.
 
-**`ui`/`app`/`discovery` are no longer built** (removed from `CMakeLists.txt` — this was
-already in progress, uncommitted, when this repo was transferred to macOS): the
-terminal UI client, top-level orchestrator, and Win32 mDNS discovery are being replaced
-by a Rust server + Android app per project notes. `include/cloak/{ui,app,discovery}` and
-`src/{ui,app,discovery}` still exist on disk but aren't part of any current build target.
+**`ui`/`app`/`discovery` are gone** (removed from `CMakeLists.txt` and their source
+deleted — this was already in progress, uncommitted, when this repo was transferred to
+macOS, then committed as part of the port): the terminal UI client, top-level
+orchestrator, and Win32 mDNS discovery are being replaced by a Rust server + Android
+app per project notes. Nothing under those names exists in `src/` or `include/cloak/`
+anymore.
 
 **Module ownership** (each is a separate CMake library under `src/`; all except `ui`/`app`/`discovery` build on every platform):
 
@@ -80,15 +81,16 @@ by a Rust server + Android app per project notes. `include/cloak/{ui,app,discove
 | ~~`app`~~ | ~~`ChatApplication` — top-level orchestrator~~ — not built (see above) |
 | ~~`discovery`~~ | ~~Abstract `DiscoveryService`, mDNS via Win32 DNS-SD~~ — not built (see above) |
 
-**Known bug (pre-existing, not platform-specific):** `GroupManager::accept_invite`'s
-"new group invitation" branch registers the inviter's member state under
-`inviter_signing_pub` (the identity key), but `GroupSession::decrypt` looks up senders
-by their per-group Sender-Key public key (`GroupSession::own_sign_pub_`, generated fresh
-per group, unrelated to identity keys) — and that key is never actually transmitted in
-the `Invite`/`Create` wire payload at all. Group message decryption therefore always
-fails with "Unknown group member sender key" (`test_group` reproduces this). Fixing it
-needs a wire-format change (add the sender's per-group public key to `GroupOpPayload`)
-— flagged, not fixed, since it's a protocol change outside a build-portability pass.
+**Fixed bug (was: pre-existing, not platform-specific):** `GroupOpPayload`'s Invite/
+Create ops used to never transmit the sender's own per-group Sender-Key public key
+(`GroupSession::own_sign_pub_`) — only `member_key` (who's being invited) and the
+sender's chain state. `GroupManager::accept_invite`/`GroupSession::apply_op` registered
+new members under the wrong key, so `GroupSession::decrypt` always failed with "Unknown
+group member sender key." Fixed by adding a `sender_sign_pub` field to `GroupOpPayload`
+(wire format changed — `framing.h`/`.cpp` and the `include/cloak/` mirror), populated
+by `make_create_op`/`make_invite_op`, and used (instead of `member_key`) to register
+members in `apply_op`/`accept_invite`. All 9/9 test suites pass now, including
+`test_group`.
 
 **Data flow (send):** `ChatApplication` → `SessionManager` → `Session` (DR encrypt) → `wire::encode_app()` → `Transport::send()`
 

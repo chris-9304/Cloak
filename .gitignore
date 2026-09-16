@@ -2,6 +2,10 @@
 build/
 vcpkg_installed/
 
+# Packaged release output (regenerate with build-dist.ps1 on Windows) -- was
+# previously committed with ~78MB of prebuilt .exe/.dll/.zip binaries.
+dist/
+
 # VS and IDEs
 .vs/
 .vscode/
