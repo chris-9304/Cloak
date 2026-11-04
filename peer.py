@@ -1,104 +1,100 @@
 #!/usr/bin/env python3
 """
 Peer management module for encrypted chat application.
-Handles peer information and connection states.
+Handles peer information, connection states, and lifetime tracking.
 """
 
-import socket
+import time
 from typing import Optional
 
+
 class Peer:
-    def __init__(self, name: str, ip_address: str, port: int = 8080):
+    """Represents a remote chat peer discovered on the LAN."""
+
+    def __init__(self, name: str, ip_address: str, port: int = 5001):
         self.name = name
         self.ip_address = ip_address
-        self.port = port
+        self.port = port               # TCP port the peer listens on
         self.is_connected = False
-        self.connection_time = None
+        self.last_seen: float = time.time()
 
-    def __str__(self):
-        return f"{self.ip_address} - {self.name}"
+    # ── display helpers ─────────────────────────────────────────────
+    def __str__(self) -> str:
+        return f"{self.name} ({self.ip_address}:{self.port})"
+
+    def __repr__(self) -> str:
+        return f"Peer({self.name!r}, {self.ip_address!r}, {self.port})"
+
+    @property
+    def uid(self) -> str:
+        """Unique identifier for this peer (ip:port)."""
+        return f"{self.ip_address}:{self.port}"
+
+    # ── state helpers ───────────────────────────────────────────────
+    def touch(self) -> None:
+        """Mark this peer as recently seen."""
+        self.last_seen = time.time()
+
+    def is_stale(self, timeout: float = 15.0) -> bool:
+        """Return True if the peer hasn't been seen within *timeout* seconds."""
+        return (time.time() - self.last_seen) > timeout
 
     def connect(self) -> bool:
-        """Attempt to connect to this peer"""
-        # In a real implementation, this would establish a TCP connection
-        # For now, we'll just set the connection state
         self.is_connected = True
         return True
 
-    def disconnect(self):
-        """Disconnect from this peer"""
+    def disconnect(self) -> None:
         self.is_connected = False
-        self.connection_time = None
 
-    def is_reachable(self) -> bool:
-        """Check if this peer is reachable"""
-        # In a real implementation, this would ping the peer or attempt connection
-        # For now, we'll assume peers are reachable
-        return True
 
 class PeerManager:
+    """Thread-safe registry of discovered peers."""
+
     def __init__(self):
-        self.peers = {}
-        self.connected_peer = None
+        self.peers: dict[str, Peer] = {}   # uid → Peer
+        self.connected_peer: Optional[Peer] = None
 
-    def add_peer(self, peer: Peer) -> bool:
-        """Add a peer to the manager"""
-        if peer.ip_address in self.peers:
-            return False
+    def upsert(self, peer: Peer) -> bool:
+        """Add or update a peer.  Returns True if it's a *new* peer."""
+        is_new = peer.uid not in self.peers
+        peer.touch()
+        self.peers[peer.uid] = peer
+        return is_new
 
-        self.peers[peer.ip_address] = peer
-        return True
-
-    def remove_peer(self, ip_address: str) -> bool:
-        """Remove a peer from the manager"""
-        if ip_address in self.peers:
-            del self.peers[ip_address]
+    def remove(self, uid: str) -> bool:
+        if uid in self.peers:
+            del self.peers[uid]
             return True
         return False
 
-    def get_peer(self, ip_address: str) -> Optional[Peer]:
-        """Get a peer by IP address"""
-        return self.peers.get(ip_address)
+    def get(self, uid: str) -> Optional[Peer]:
+        return self.peers.get(uid)
 
-    def get_all_peers(self) -> list:
-        """Get all peers"""
+    def all_peers(self) -> list[Peer]:
         return list(self.peers.values())
 
-    def get_connected_peer(self) -> Optional[Peer]:
-        """Get the currently connected peer"""
-        return self.connected_peer
+    def prune_stale(self, timeout: float = 15.0) -> list[str]:
+        """Remove peers not seen within *timeout* seconds.  Returns removed uids."""
+        stale = [uid for uid, p in self.peers.items() if p.is_stale(timeout)]
+        for uid in stale:
+            del self.peers[uid]
+        return stale
 
-    def set_connected_peer(self, peer: Peer) -> bool:
-        """Set the currently connected peer"""
-        if peer.is_connected:
-            self.connected_peer = peer
-            return True
-        return False
+    def set_connected(self, peer: Peer) -> None:
+        self.connected_peer = peer
 
-    def clear_connections(self):
-        """Clear all peer connections"""
-        for peer in self.peers.values():
-            peer.disconnect()
+    def clear_connected(self) -> None:
+        if self.connected_peer:
+            self.connected_peer.disconnect()
         self.connected_peer = None
 
-# Example usage (for testing)
+
+# ── quick self-test ─────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test the peer manager
     pm = PeerManager()
-
-    # Add some peers
-    peer1 = Peer("Alice", "192.168.1.101", 8080)
-    peer2 = Peer("Bob", "192.168.1.102", 8080)
-
-    pm.add_peer(peer1)
-    pm.add_peer(peer2)
-
-    print("All peers:")
-    for peer in pm.get_all_peers():
-        print(f"  {peer}")
-
-    # Connect to a peer
-    if pm.set_connected_peer(peer1):
-        print(f"Connected to {pm.get_connected_peer()}")
-    else:
-        print("Failed to connect to peer")
+    p1 = Peer("Alice", "192.168.1.101", 5001)
+    p2 = Peer("Bob", "192.168.1.102", 5001)
+    print(f"new? {pm.upsert(p1)}")   # True
+    print(f"new? {pm.upsert(p1)}")   # False (update)
+    pm.upsert(p2)
+    print("All peers:", pm.all_peers())

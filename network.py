@@ -1,158 +1,333 @@
 #!/usr/bin/env python3
 """
-Network communication module for encrypted chat application.
-Handles TCP connections and message framing.
+Network communication module for encrypted peer-to-peer chat.
+
+Provides:
+  • UDP broadcast-based peer *discovery*  (announce + listen + manual scan)
+  • TCP connection management  (connect, accept, send, receive)
+  • Length-prefixed message framing  (4-byte big-endian header)
+
+All public callbacks are fired on background threads – the caller is
+responsible for marshalling onto the GUI thread (e.g. via root.after()).
 """
 
-import socket
-import threading
 import json
-import time
-from typing import Optional, Tuple
+import socket
 import struct
+import threading
+import time
+from typing import Callable, Optional
 
-class NetworkManager:
-    def __init__(self):
-        self.socket = None
-        self.is_connected = False
-        self.receive_thread = None
 
-    def connect_to_peer(self, host: str, port: int) -> bool:
-        """Connect to a peer at the specified host and port"""
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(10)  # 10 second timeout
-            self.socket.connect((host, port))
-            self.is_connected = True
+# ── Constants ───────────────────────────────────────────────────────
+DISCOVERY_PORT = 5000          # UDP port for broadcast beacons
+DEFAULT_TCP_PORT = 5001        # Default TCP port for chat messages
+BROADCAST_INTERVAL = 3         # seconds between discovery beacons
+BUFFER_SIZE = 65536
 
-            # Start receiving messages in a separate thread
-            self.receive_thread = threading.Thread(target=self._receive_messages, daemon=True)
-            self.receive_thread.start()
 
-            return True
-        except Exception as e:
-            print(f"Connection failed: {e}")
-            return False
+# ── helpers ─────────────────────────────────────────────────────────
 
-    def listen_for_peers(self, port: int) -> bool:
-        """Listen for incoming connections on the specified port"""
-        try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind(('0.0.0.0', port))
-            self.socket.listen(5)
+def _get_local_ip() -> str:
+    """Best-effort detection of this machine's LAN IP."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
-            # Start accepting connections in a separate thread
-            accept_thread = threading.Thread(target=self._accept_connections, daemon=True)
-            accept_thread.start()
 
-            return True
-        except Exception as e:
-            print(f"Failed to start listening: {e}")
-            return False
+def _recv_exact(sock: socket.socket, n: int) -> bytes:
+    """Read exactly *n* bytes from *sock* or raise."""
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("connection closed")
+        buf += chunk
+    return buf
 
-    def _accept_connections(self):
-        """Accept incoming connections"""
-        while self.socket:
+
+# ── Discovery (UDP) ────────────────────────────────────────────────
+
+class DiscoveryService:
+    """Announces this peer and listens for others via UDP broadcast.
+
+    Supports a manual ``scan()`` that fires an immediate burst of broadcasts
+    so peers are discovered faster.
+    """
+
+    def __init__(
+        self,
+        username: str,
+        tcp_port: int = DEFAULT_TCP_PORT,
+        discovery_port: int = DISCOVERY_PORT,
+        on_peer_found: Optional[Callable] = None,
+    ):
+        self.username = username
+        self.tcp_port = tcp_port
+        self.discovery_port = discovery_port
+        self.local_ip = _get_local_ip()
+        self.on_peer_found = on_peer_found   # callback(name, ip, port)
+        self._running = False
+        self._broadcast_sock: Optional[socket.socket] = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        self._running = True
+        threading.Thread(target=self._broadcast_loop, daemon=True).start()
+        threading.Thread(target=self._listen_loop, daemon=True).start()
+
+    def stop(self) -> None:
+        self._running = False
+
+    def update_username(self, name: str) -> None:
+        self.username = name
+
+    def scan(self) -> None:
+        """Send an immediate burst of discovery beacons (3 rapid-fire)."""
+        def _burst():
+            for _ in range(3):
+                self._send_beacon()
+                time.sleep(0.3)
+        threading.Thread(target=_burst, daemon=True).start()
+
+    # ── internals ───────────────────────────────────────────────────
+
+    def _make_payload(self) -> bytes:
+        return json.dumps({
+            "type": "discovery",
+            "name": self.username,
+            "ip": self.local_ip,
+            "port": self.tcp_port,
+        }).encode()
+
+    def _send_beacon(self) -> None:
+        with self._lock:
             try:
-                client_socket, address = self.socket.accept()
-                print(f"Connection from {address}")
-                # Handle client in a separate thread
-                client_thread = threading.Thread(
-                    target=self._handle_client,
-                    args=(client_socket,),
-                    daemon=True
-                )
-                client_thread.start()
+                if self._broadcast_sock is None:
+                    self._broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    self._broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                    self._broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    try:
+                        self._broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    except (AttributeError, OSError):
+                        pass
+                self._broadcast_sock.sendto(self._make_payload(), ("<broadcast>", self.discovery_port))
+            except Exception:
+                self._broadcast_sock = None
+
+    def _broadcast_loop(self) -> None:
+        while self._running:
+            self._send_beacon()
+            time.sleep(BROADCAST_INTERVAL)
+        with self._lock:
+            if self._broadcast_sock:
+                try:
+                    self._broadcast_sock.close()
+                except Exception:
+                    pass
+                self._broadcast_sock = None
+
+    def _listen_loop(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        sock.bind(("", self.discovery_port))
+        sock.settimeout(2)
+        while self._running:
+            try:
+                data, addr = sock.recvfrom(BUFFER_SIZE)
+                msg = json.loads(data.decode())
+                if msg.get("type") != "discovery":
+                    continue
+                peer_ip = msg["ip"]
+                peer_port = msg["port"]
+                peer_name = msg["name"]
+                # Ignore our own broadcasts (compare ip AND port)
+                if peer_ip == self.local_ip and peer_port == self.tcp_port:
+                    continue
+                if self.on_peer_found:
+                    self.on_peer_found(peer_name, peer_ip, peer_port)
+            except socket.timeout:
+                continue
+            except Exception:
+                continue
+        sock.close()
+
+
+# ── TCP Chat Connection ────────────────────────────────────────────
+
+class ChatConnection:
+    """Manages a single TCP connection for exchanging chat messages.
+
+    Messages are framed as:
+        [4-byte big-endian length][payload bytes]
+    Payload is a JSON envelope: {"type": ..., "data": ...}
+    """
+
+    MSG_CHAT = "chat"
+    MSG_HANDSHAKE = "handshake"
+    MSG_DISCONNECT = "disconnect"
+
+    def __init__(
+        self,
+        on_message: Optional[Callable] = None,
+        on_disconnect: Optional[Callable] = None,
+    ):
+        self.sock: Optional[socket.socket] = None
+        self.on_message = on_message          # callback(msg_type, data_dict)
+        self.on_disconnect = on_disconnect    # callback()
+        self._running = False
+        self._send_lock = threading.Lock()
+        self._disconnected_fired = False
+
+    # ── outgoing connection ─────────────────────────────────────────
+
+    def connect(self, host: str, port: int) -> bool:
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.settimeout(5)
+            self.sock.connect((host, port))
+            self.sock.settimeout(None)
+            self._running = True
+            threading.Thread(target=self._recv_loop, daemon=True).start()
+            return True
+        except Exception as e:
+            print(f"[ChatConnection] connect failed: {e}")
+            self.sock = None
+            return False
+
+    # ── accept an incoming connection ───────────────────────────────
+
+    def accept(self, client_sock: socket.socket) -> None:
+        self.sock = client_sock
+        self._running = True
+        threading.Thread(target=self._recv_loop, daemon=True).start()
+
+    # ── sending ─────────────────────────────────────────────────────
+
+    def send(self, msg_type: str, data: dict) -> bool:
+        if not self.sock or not self._running:
+            return False
+        with self._send_lock:
+            try:
+                payload = json.dumps({"type": msg_type, "data": data}).encode()
+                header = struct.pack("!I", len(payload))
+                self.sock.sendall(header + payload)
+                return True
             except Exception as e:
-                if self.socket:
-                    print(f"Error accepting connection: {e}")
+                print(f"[ChatConnection] send error: {e}")
+                return False
+
+    # ── receiving ───────────────────────────────────────────────────
+
+    def _recv_loop(self) -> None:
+        try:
+            while self._running and self.sock:
+                header = _recv_exact(self.sock, 4)
+                length = struct.unpack("!I", header)[0]
+                if length > 10 * 1024 * 1024:  # sanity cap 10 MB
+                    break
+                payload = _recv_exact(self.sock, length)
+                envelope = json.loads(payload.decode())
+                msg_type = envelope.get("type", "")
+                data = envelope.get("data", {})
+                if msg_type == self.MSG_DISCONNECT:
+                    break
+                if self.on_message:
+                    self.on_message(msg_type, data)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            self._running = False
+            self._fire_disconnect()
+
+    # ── teardown ────────────────────────────────────────────────────
+
+    def _fire_disconnect(self) -> None:
+        """Fire the on_disconnect callback exactly once."""
+        if not self._disconnected_fired:
+            self._disconnected_fired = True
+            if self.on_disconnect:
+                self.on_disconnect()
+
+    def close(self) -> None:
+        was_running = self._running
+        self._running = False
+        if self.sock:
+            if was_running:
+                try:
+                    payload = json.dumps({"type": self.MSG_DISCONNECT, "data": {}}).encode()
+                    header = struct.pack("!I", len(payload))
+                    self.sock.sendall(header + payload)
+                except Exception:
+                    pass
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+
+    @property
+    def is_alive(self) -> bool:
+        return self._running and self.sock is not None
+
+
+# ── TCP Listener ────────────────────────────────────────────────────
+
+class TCPListener:
+    """Listens for incoming TCP connections on a given port."""
+
+    def __init__(self, port: int, on_accept: Callable):
+        self.port = port
+        self.on_accept = on_accept       # callback(client_socket, address)
+        self._server: Optional[socket.socket] = None
+        self._running = False
+
+    def start(self) -> None:
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        self._server.bind(("0.0.0.0", self.port))
+        self._server.listen(5)
+        self._server.settimeout(2)
+        self._running = True
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._server:
+            try:
+                self._server.close()
+            except Exception:
+                pass
+
+    def _accept_loop(self) -> None:
+        while self._running:
+            try:
+                client, addr = self._server.accept()
+                self.on_accept(client, addr)
+            except socket.timeout:
+                continue
+            except OSError:
                 break
 
-    def _handle_client(self, client_socket):
-        """Handle communication with a connected client"""
-        try:
-            while self.is_connected:
-                # Receive message length
-                length_data = client_socket.recv(4)
-                if not length_data:
-                    break
 
-                message_length = struct.unpack('!I', length_data)[0]
-
-                # Receive the actual message
-                message_data = client_socket.recv(message_length)
-                if not message_data:
-                    break
-
-                # Process the received message
-                self._process_message(message_data)
-
-        except Exception as e:
-            print(f"Error handling client: {e}")
-        finally:
-            client_socket.close()
-
-    def _receive_messages(self):
-        """Receive messages from the connected peer"""
-        try:
-            while self.is_connected and self.socket:
-                # Receive message length
-                length_data = self.socket.recv(4)
-                if not length_data:
-                    break
-
-                message_length = struct.unpack('!I', length_data)[0]
-
-                # Receive the actual message
-                message_data = self.socket.recv(message_length)
-                if not message_data:
-                    break
-
-                # Process the received message
-                self._process_message(message_data)
-
-        except Exception as e:
-            print(f"Error receiving messages: {e}")
-        finally:
-            self.is_connected = False
-
-    def _process_message(self, message_data: bytes):
-        """Process a received message"""
-        try:
-            # In a real implementation, this would decrypt and handle the message
-            print(f"Received message: {message_data}")
-        except Exception as e:
-            print(f"Error processing message: {e}")
-
-    def send_message(self, message: bytes) -> bool:
-        """Send a message to the connected peer"""
-        if not self.is_connected or not self.socket:
-            return False
-
-        try:
-            # Frame the message: [4-byte length][message data]
-            message_length = len(message)
-            framed_message = struct.pack('!I', message_length) + message
-
-            self.socket.sendall(framed_message)
-            return True
-        except Exception as e:
-            print(f"Error sending message: {e}")
-            self.is_connected = False
-            return False
-
-    def disconnect(self):
-        """Disconnect from the peer"""
-        self.is_connected = False
-        if self.socket:
-            self.socket.close()
-            self.socket = None
-
-# Example usage (for testing)
+# ── quick self-test ─────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Test the network manager
-    nm = NetworkManager()
-
-    # This would be used in the main application to handle connections
-    print("NetworkManager initialized")
+    print(f"Local IP: {_get_local_ip()}")
+    print("NetworkManager modules loaded OK")

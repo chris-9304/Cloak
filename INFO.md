@@ -1,175 +1,95 @@
-# Encrypted Chat Application - Detailed Information
+# Encrypted Chat Application — Documentation
 
 ## Overview
 
-This directory contains a complete encrypted chat application implementation with all Python files organized in the `python/` folder. The application provides end-to-end encryption for secure peer-to-peer communication.
+A **real peer-to-peer encrypted chat** application for devices on the same local network. Peers automatically discover each other via UDP broadcast and communicate over TCP with end-to-end Fernet encryption.
+
+## Quick Start
+
+### Prerequisites
+```bash
+pip install cryptography
+```
+
+### Run on two different machines (same LAN)
+```bash
+# Machine A
+python3 chat_app.py --name Alice
+
+# Machine B
+python3 chat_app.py --name Bob
+```
+
+### Test locally on the same machine
+```bash
+# Terminal 1
+python3 chat_app1.py
+
+# Terminal 2
+python3 chat_app2.py
+```
+
+Both windows will automatically discover each other. Set the **same encryption password** on both sides, select the peer, and click **Connect**.
 
 ## Architecture
 
-The application follows a modular architecture with the following components:
-
-### 1. Encryption Module (`encryption.py`)
-- **Purpose**: Handles all encryption and decryption operations
-- **Technology**: PBKDF2 key derivation with SHA-256
-- **Security**: 100,000 iterations for key derivation
-- **Features**: 
-  - Password-based key generation
-  - Message encryption/decryption
-  - Error handling and validation
-
-### 2. Peer Management (`peer.py`)
-- **Purpose**: Manages peer information and connection states
-- **Features**:
-  - Peer representation with name, IP, and port
-  - Connection state tracking (connected/disconnected)
-  - Peer discovery framework
-
-### 3. Network Communication (`network.py`)
-- **Purpose**: Handles TCP network connections and message framing
-- **Protocol**: 4-byte big-endian length prefix followed by message type and payload
-- **Features**:
-  - TCP socket management
-  - Message framing and parsing
-  - Connection establishment
-
-### 4. Chat Application (`chat_app.py`)
-- **Purpose**: Main application with GUI interface
-- **Technology**: tkinter for GUI components
-- **Features**:
-  - User name and password input
-  - Peer discovery panel
-  - Chat message display
-  - Message sending interface
-
-## Directory Contents
-
 ```
-python/
-├── chat_app.py          # Main GUI application with tkinter
-├── chat_demo.py         # Complete text-based demo application
-├── direct_test.py       # Direct encryption test script
-├── encryption.py        # Core encryption functionality
-├── final_demo.py        # Final demonstration script
-├── gui_chat.py          # Alternative GUI implementation
-├── network.py           # Network communication module
-├── peer.py              # Peer management module
-├── simple_chat.py       # Simple command-line chat demo
-├── simple_demo.py       # Simple encryption demo
-└── test_encryption.py   # Encryption module tests
+┌─────────────┐         UDP broadcast          ┌─────────────┐
+│  chat_app1  │ ◄──────────────────────────────► │  chat_app2  │
+│  (Alice)    │         discovery beacons        │  (Bob)      │
+│  port 5001  │                                  │  port 5002  │
+│             │ ◄──────── TCP connection ───────► │             │
+│             │      length-prefixed JSON        │             │
+│             │      + Fernet-encrypted msgs     │             │
+└─────────────┘                                  └─────────────┘
 ```
 
-## How to Run
+### Module Breakdown
 
-### Prerequisites
-- Python 3.x with standard library modules
-- No external dependencies required (uses only built-in libraries)
+| File | Purpose |
+|------|---------|
+| `encryption.py` | PBKDF2 key derivation + Fernet encrypt/decrypt with shared-salt support |
+| `network.py` | UDP discovery service, TCP listener, TCP chat connection with length-prefixed framing |
+| `peer.py` | Peer model with staleness tracking + PeerManager registry |
+| `chat_app.py` | Main application — modern dark-themed tkinter GUI + all networking |
+| `chat_app1.py` | Convenience launcher for instance 1 (Alice, port 5001) |
+| `chat_app2.py` | Convenience launcher for instance 2 (Bob, port 5002) |
 
-### Running the Demo Applications
+### Network Protocol
 
-1. **Complete Text-based Demo**:
-   ```bash
-   python3 python/chat_demo.py
-   ```
+**Discovery (UDP port 5000):**
+- Broadcast every 3 seconds: `{"type": "discovery", "name": "...", "ip": "...", "port": ...}`
+- Peers that stop broadcasting are pruned after 12 seconds
 
-2. **Simple Encryption Demo**:
-   ```bash
-   python3 python/simple_demo.py
-   ```
+**Chat (TCP, configurable port):**
+- Messages are framed as `[4-byte big-endian length][JSON payload]`
+- JSON envelope: `{"type": "handshake"|"chat"|"disconnect", "data": {...}}`
+- Chat payloads contain Fernet-encrypted ciphertext
 
-3. **Direct Encryption Test**:
-   ```bash
-   python3 python/direct_test.py
-   ```
+### Encryption
 
-4. **Final Demonstration**:
-   ```bash
-   python3 python/final_demo.py
-   ```
+1. Both users enter the **same password**
+2. PBKDF2-HMAC-SHA256 derives a 32-byte key (100,000 iterations + random 16-byte salt)
+3. The connecting peer sends its salt in the handshake so both sides can derive compatible keys
+4. Messages are encrypted with **Fernet** (AES-128-CBC + HMAC-SHA256)
 
-### GUI Application (if tkinter is available)
-```bash
-python3 python/chat_app.py
+### CLI Options
+
+```
+python3 chat_app.py [--port PORT] [--discovery-port PORT] [--name NAME]
+
+  --port             TCP listen port (default: 5001)
+  --discovery-port   UDP discovery port (default: 5000)
+  --name             Preset display name
 ```
 
-## Security Features
+## Legacy Demo Files
 
-### Encryption Process
-1. User provides password for encryption
-2. Password is hashed with PBKDF2 to derive 32-byte key (100,000 iterations)
-3. Message is XOR-encrypted with the derived key
-4. Encrypted message is transmitted securely
-
-### Key Security Aspects
-- Passwords are not stored in plaintext
-- Keys are derived from passwords using PBKDF2 with 100,000 iterations
-- All sensitive data is handled securely in memory
-- No plaintext messages are stored on disk
-- Message integrity through encryption
-
-## Network Protocol
-
-Messages follow this framing format:
-- **4-byte big-endian length prefix**
-- **1-byte message type identifier** 
-- **Variable-length payload**
-
-This ensures reliable message parsing and transmission over TCP connections.
-
-## Implementation Details
-
-### Encryption Implementation
-The encryption uses PBKDF2 with SHA-256 to derive a secure 32-byte key from user passwords. For demonstration purposes, XOR encryption is used, but the architecture supports integration with proper libraries like Fernet.
-
-### Peer Management
-The peer management system handles:
-- Peer objects with name, IP address, and port
-- Connection state tracking (connected/disconnected)
-- Basic peer discovery framework
-
-### Network Communication
-Network communication handles:
-- TCP socket management for peer connections
-- Message framing with 4-byte length prefixes
-- Connection establishment protocols
-
-## Testing
-
-The application includes comprehensive tests:
-- `test_encryption.py`: Tests encryption/decryption functionality
-- `direct_test.py`: Direct encryption verification
-- Various demo scripts that demonstrate core functionality
-
-## Future Improvements
-
-The implementation is designed to be extensible with:
-1. **Enhanced encryption** with proper libraries (Fernet)
-2. **Improved GUI** with better visual design
-3. **Advanced peer discovery** mechanisms
-4. **File transfer capabilities**
-5. **Multi-user group chat support**
-
-## Limitations
-
-This is a demonstration implementation focused on core functionality:
-- GUI components are functional but may require additional setup
-- Network communication requires proper environment configuration
-- Production deployment would require additional security hardening
-
-## Files Summary
-
-### Core Implementation Files:
-- `encryption.py`: Main encryption logic with PBKDF2 key derivation
-- `peer.py`: Peer management and connection state handling  
-- `network.py`: Network communication and message framing
-- `chat_app.py`: Main GUI application with tkinter interface
-
-### Demonstration Files:
-- `chat_demo.py`: Complete text-based demo application
-- `simple_chat.py`: Simple command-line chat demonstration
-- `test_encryption.py`: Encryption module tests
-- `simple_demo.py`: Alternative simple demo
-- `final_demo.py`: Final comprehensive demonstration
-- `direct_test.py`: Direct encryption verification
-- `gui_chat.py`: Alternative GUI implementation
-
-All files are designed to work together as a complete encrypted chat solution while maintaining clean separation of concerns.
+| File | Description |
+|------|-------------|
+| `chat_demo.py` | Text-based demo |
+| `simple_chat.py` | Simple CLI chat demo |
+| `gui_chat.py` | Old minimal GUI |
+| `simple_demo.py` | Basic encryption demo |
+| `final_demo.py` | Final demo script |
+| `direct_test.py` | Direct encryption test |
