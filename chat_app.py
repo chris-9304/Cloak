@@ -202,20 +202,50 @@ class ChatApp:
         self.local_ip = _get_local_ip()
         self._running = True
         self._session_start = time.time()
+        self._scan_timer = None
 
+        # Initialize UI components and setup the root window
         self._setup_root()
-        self._build_ui()
-        self._start_services()
-        self._tick_clock()
 
+        # If we have a preset name, skip setup and go directly to main UI
         if self.username:
+            # Setup already complete - go to main UI directly
+            self.name_var = tk.StringVar()
+            self.pass_var = tk.StringVar()
+
+            # Set up encryption
+            if self.encryption.set_password(self.password):
+                self.enc_status = tk.Label(
+                    self.root,
+                    text="■ CIPHER ONLINE  //  FERNET-AES",
+                    bg=BG_PANEL,
+                    fg=GREEN,
+                    font=(FONT, 9),
+                    anchor="w"
+                )
+            else:
+                self.enc_status = tk.Label(
+                    self.root,
+                    text="■ KEY DERIVATION FAILED",
+                    bg=BG_PANEL,
+                    fg=RED,
+                    font=(FONT, 9),
+                    anchor="w"
+                )
+
+            self._build_ui()
+            self._start_services()
+            self._tick_clock()
             self.name_var.set(self.username)
             self._on_name_set()
+        else:
+            # Show setup screen first
+            self._show_setup_screen()
 
     # ── root config ─────────────────────────────────────────────────
 
     def _setup_root(self):
-        self.root.title("GHOST_LINK // ENCRYPTED P2P")
+        self.root.title("CLOAK // ENCRYPTED P2P")
         self.root.geometry("980x720")
         self.root.minsize(760, 560)
         self.root.configure(bg=BG_DARK)
@@ -228,6 +258,203 @@ class ChatApp:
                         background=BG_PANEL, troughcolor=BG_DARK,
                         arrowcolor=FG_DIM, borderwidth=0)
 
+    def _show_setup_screen(self):
+        """Show the setup screen before the main chat interface."""
+        # Clear the root window
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        # Create main setup frame
+        setup_frame = tk.Frame(self.root, bg=BG_DARK)
+        setup_frame.pack(fill=tk.BOTH, expand=True)
+        setup_frame.grid_rowconfigure(0, weight=0)  # Title
+        setup_frame.grid_rowconfigure(1, weight=0)  # Subtitle
+        setup_frame.grid_rowconfigure(2, weight=0)  # Panel
+        setup_frame.grid_rowconfigure(3, weight=1)  # Empty space at bottom
+
+        # Title
+        title_label = tk.Label(
+            setup_frame,
+            text="CLOAK",
+            bg=BG_DARK,
+            fg=PINK,
+            font=(FONT, 24, "bold")
+        )
+        title_label.pack(pady=(100, 20))
+
+        # Subtitle
+        subtitle_label = tk.Label(
+            setup_frame,
+            text="ENCRYPTED P2P CHAT PROTOCOL",
+            bg=BG_DARK,
+            fg=FG_DIM,
+            font=(FONT, 12)
+        )
+        subtitle_label.pack(pady=(0, 50))
+
+        # Setup panel
+        panel_frame = tk.Frame(setup_frame, bg=BG_PANEL, relief="raised", bd=1)
+        panel_frame.pack(pady=20, padx=40, fill=tk.X, expand=False)
+
+        # Username input
+        tk.Label(
+            panel_frame,
+            text="CALLSIGN",
+            bg=BG_PANEL,
+            fg=FG_DIM,
+            font=(FONT, 10)
+        ).pack(anchor="w", pady=(20, 5), padx=20)
+
+        self.setup_name_var = tk.StringVar()
+        name_entry = tk.Entry(
+            panel_frame,
+            textvariable=self.setup_name_var,
+            bg=BG_INPUT,
+            fg=GREEN,
+            insertbackground=GREEN,
+            font=(FONT, 12),
+            bd=0,
+            highlightthickness=1,
+            highlightcolor=PINK,
+            highlightbackground=BORDER
+        )
+        name_entry.pack(fill=tk.X, ipady=5, pady=(0, 20), padx=20)
+        name_entry.bind("<Return>", lambda e: self._setup_complete())
+
+        # Password input
+        tk.Label(
+            panel_frame,
+            text="ENCRYPTION KEY",
+            bg=BG_PANEL,
+            fg=FG_DIM,
+            font=(FONT, 10)
+        ).pack(anchor="w", pady=(0, 5), padx=20)
+
+        self.setup_pass_var = tk.StringVar()
+        pass_frame = tk.Frame(panel_frame, bg=BG_PANEL)
+        pass_frame.pack(fill=tk.X, pady=(0, 20), padx=20)
+
+        self.setup_pass_entry = tk.Entry(
+            pass_frame,
+            textvariable=self.setup_pass_var,
+            show="█",
+            bg=BG_INPUT,
+            fg=PINK,
+            insertbackground=PINK,
+            font=(FONT, 12),
+            bd=0,
+            highlightthickness=1,
+            highlightcolor=PINK,
+            highlightbackground=BORDER
+        )
+        self.setup_pass_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=5)
+        self.setup_pass_entry.bind("<Return>", lambda e: self._setup_complete())
+
+        # Show/Hide button
+        self.setup_show_pass_btn = tk.Button(
+            pass_frame,
+            text="SHOW",
+            command=self._toggle_password_visibility,
+            bg=BORDER,
+            fg=FG_DIM,
+            font=(FONT, 8),
+            relief="flat",
+            bd=0,
+            padx=5,
+            pady=2
+        )
+        self.setup_show_pass_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+        # Error label
+        self.setup_error_label = tk.Label(
+            panel_frame,
+            text="",
+            bg=BG_PANEL,
+            fg=RED,
+            font=(FONT, 9)
+        )
+        self.setup_error_label.pack(pady=(0, 15), padx=20)
+
+        # Setup button
+        setup_btn = tk.Button(
+            panel_frame,
+            text="INITIALIZE CLOAK",
+            command=self._setup_complete,
+            bg=PINK,
+            fg="#0a0a0f",
+            font=(FONT, 10, "bold"),
+            relief="flat",
+            bd=0,
+            padx=20,
+            pady=5
+        )
+        setup_btn.pack(pady=(0, 20))
+
+        # Focus on name entry
+        name_entry.focus_set()
+
+    def _toggle_password_visibility(self):
+        """Toggle password visibility in the setup screen."""
+        if self.setup_pass_entry.cget("show") == "█":
+            self.setup_pass_entry.configure(show="")
+            self.setup_show_pass_btn.configure(text="HIDE")
+        else:
+            self.setup_pass_entry.configure(show="█")
+            self.setup_show_pass_btn.configure(text="SHOW")
+
+    def _setup_complete(self):
+        """Complete the setup process and initialize the main UI."""
+        name = self.setup_name_var.get().strip()
+        password = self.setup_pass_var.get()
+
+        # Validate inputs
+        if not name:
+            self.setup_error_label.configure(text="Enter a callsign")
+            return
+
+        if not password:
+            self.setup_error_label.configure(text="Enter an encryption key")
+            return
+
+        # Store the values
+        self.username = name
+        self.password = password
+
+        # Clear setup screen
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        # Initialize main UI components
+        self.name_var = tk.StringVar()
+        self.pass_var = tk.StringVar()
+
+        # Set up encryption
+        if self.encryption.set_password(password):
+            self.enc_status = tk.Label(
+                self.root,
+                text="■ CIPHER ONLINE  //  FERNET-AES",
+                bg=BG_PANEL,
+                fg=GREEN,
+                font=(FONT, 9),
+                anchor="w"
+            )
+        else:
+            self.enc_status = tk.Label(
+                self.root,
+                text="■ KEY DERIVATION FAILED",
+                bg=BG_PANEL,
+                fg=RED,
+                font=(FONT, 9),
+                anchor="w"
+            )
+
+        # Build the main UI
+        self._build_ui()
+        self._start_services()
+        self._tick_clock()
+        self.name_var.set(self.username)
+        self._on_name_set()
+
     # ── build UI ────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -236,7 +463,7 @@ class ChatApp:
         topbar.pack(fill=tk.X, padx=10, pady=(8, 0))
         tk.Label(topbar, text="■", bg=BG_DARK, fg=GREEN,
                  font=(FONT, 10)).pack(side=tk.LEFT)
-        tk.Label(topbar, text="  GHOST_LINK", bg=BG_DARK, fg=PINK,
+        tk.Label(topbar, text="  CLOAK", bg=BG_DARK, fg=PINK,
                  font=(FONT, 11, "bold")).pack(side=tk.LEFT)
         tk.Label(topbar, text=" v0.1", bg=BG_DARK, fg=FG_DIM,
                  font=(FONT, 9)).pack(side=tk.LEFT)
@@ -494,6 +721,8 @@ class ChatApp:
         self.discovery.start()
         self._schedule_prune()
         self._status(f"LISTENING {self.local_ip}:{self.tcp_port}")
+        # Start periodic scanning
+        self._start_periodic_scan()
 
     def _on_peer_found(self, name, ip, port):
         p = Peer(name, ip, port)
@@ -581,6 +810,25 @@ class ChatApp:
             self._status(f"SCAN COMPLETE — {c} NODE(S)")
 
         self.root.after(2000, done)
+
+    def _start_periodic_scan(self):
+        """Start periodic network scanning every 3-5 seconds."""
+        self._schedule_periodic_scan()
+
+    def _schedule_periodic_scan(self):
+        """Schedule the next periodic scan."""
+        if not self._running:
+            return
+
+        def scan():
+            if self.discovery:
+                self.discovery.scan()
+            # Schedule next scan in 3-5 seconds (randomized)
+            delay = 3000 + (2000 * hash(str(time.time())) % 1000)  # Random between 3-5 seconds
+            self._scan_timer = self.root.after(delay, self._schedule_periodic_scan)
+
+        # Schedule the first scan immediately
+        self.root.after(100, scan)
 
     def _on_peer_select(self, _e):
         sel = self.peer_listbox.curselection()
@@ -778,6 +1026,9 @@ class ChatApp:
 
     def _on_close(self):
         self._running = False
+        # Cancel any pending scan timer
+        if self._scan_timer:
+            self.root.after_cancel(self._scan_timer)
         if self.connection:
             self.connection.close()
         if self.listener:
