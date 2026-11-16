@@ -8,6 +8,7 @@ import json
 import copy
 import re
 import textwrap
+import ast
 from xml.sax.saxutils import escape
 from PIL import Image, ImageDraw, ImageFont
 from docx import Document
@@ -35,9 +36,12 @@ for name,file in [('TNR','Times New Roman.ttf'),('TNR-Bold','Times New Roman Bol
 pdfmetrics.registerFontFamily('TNR',normal='TNR',bold='TNR-Bold',italic='TNR-Italic',boldItalic='TNR-Bold')
 identity={'students':'[STUDENT 1 NAME — REGISTRATION NUMBER]\n[STUDENT 2 NAME — REGISTRATION NUMBER]',
           'guide':'[GUIDE NAME]','designation':'[GUIDE DESIGNATION]',
-          'department':'[GUIDE DEPARTMENT]','specialization':'[SPECIALIZATION NAME]'}
+          'department':'[GUIDE DEPARTMENT]','specialization':'',
+          'project_title':'CLOAK: ENCRYPTED PEER-TO-PEER LAN CHAT',
+          'team_name':'','section':''}
 if (OUT/'identity.json').exists():identity.update(json.loads((OUT/'identity.json').read_text()))
-TITLE='CLOAK: ENCRYPTED PEER-TO-PEER LAN CHAT'
+TITLE=identity['project_title']
+guide_details='\n'.join(value for value in (identity['designation'], identity['department']) if value)
 
 
 def diagram(filename,boxes,edges,size=(1500,800)):
@@ -90,7 +94,7 @@ styles={
 }
 story=[]
 # PDF page tracking is populated during the first pass and reused for contents.
-page_map={}; current_label=None
+page_map={}
 class MarkedParagraph(Paragraph):
     def __init__(self,text,style,label=None):super().__init__(text,style);self.label=label
     def draw(self):
@@ -134,13 +138,20 @@ para(TITLE,'cover');
 for r in D.paragraphs[-1].runs:r.font.size=Pt(18)
 story[-1].style=ParagraphStyle('title',parent=styles['cover'],fontSize=18,leading=27)
 para('A PROJECT REPORT','cover');para('Submitted by','center');para(identity['students'],'cover')
-para('Under the Guidance of','center');para(identity['guide'],'cover');para(identity['designation']+'\n'+identity['department'],'center')
+if identity['team_name'] or identity['section']:
+    para(' | '.join(value for value in (identity['team_name'], 'Section: '+identity['section'] if identity['section'] else '') if value),'center')
+para('Under the Guidance of','center');para(identity['guide'],'cover');para(guide_details,'center')
 para('in partial fulfillment of the requirements for the degree of','center');para('BACHELOR OF TECHNOLOGY','cover')
-para('COMPUTER SCIENCE ENGINEERING\nwith specialization in '+identity['specialization'],'center')
+degree='COMPUTER SCIENCE ENGINEERING'
+if identity['specialization']:
+    degree+='\nwith specialization in '+identity['specialization']
+para(degree,'center')
 para('DEPARTMENT OF COMPUTING TECHNOLOGIES\nCOLLEGE OF ENGINEERING AND TECHNOLOGY\nSRM INSTITUTE OF SCIENCE AND TECHNOLOGY\nKATTANKULATHUR – 603 203','center');para('NOVEMBER 2026','center');page()
 para('SRM INSTITUTE OF SCIENCE AND TECHNOLOGY\nKATTANKULATHUR – 603 203','cover');para('BONAFIDE CERTIFICATE','cover')
 para(f'Certified that 21CSC203P – Advanced Programming Practice [Project Report] titled “{TITLE}” is the bonafide work of “{identity["students"].replace(chr(10), "; ")}” who carried out the project work under my supervision.')
-para('\n\nSIGNATURE\n\n'+identity['guide']+'\nSUPERVISOR\n'+identity['designation']+'\n'+identity['department'],'center')
+if identity['team_name'] or identity['section']:
+    para('Team: '+identity['team_name']+' | Section: '+identity['section'],'center')
+para('\n\nSIGNATURE\n\n'+identity['guide']+'\nSUPERVISOR\n'+guide_details,'center')
 para('Signature and institutional approval to be completed by the authorized supervisor.','center');page()
 para('ABSTRACT','h1')
 para('CLOAK is a Python desktop application for one-to-one encrypted text communication on a local network. The project combines a Tkinter interface, UDP peer discovery, TCP stream framing, password-derived Fernet encryption, and an explicit password-confirmation handshake. Its revised workflow requires setup in every launcher and enables messaging only after the two clients demonstrate possession of the same shared password.')
@@ -148,7 +159,7 @@ para('The implementation separates graphical state from secure-session behavior 
 para('Verification combines automated encryption and protocol tests with a live two-window desktop check. The available evidence covers local discovery, bidirectional messaging, password rejection, disconnect, and reconnection. The design remains an educational shared-password LAN system: it does not provide independent identity verification, forward secrecy, internet relaying, or persistent messaging. The report records these limits and separates verified local behavior from a pending two-device LAN trial.');page()
 para('TABLE OF CONTENTS','h1')
 # Dynamic DOCX TOC; PDF contents resolved in second pass.
-p=D.add_paragraph();field=OxmlElement('w:fldSimple');field.set(qn('w:instr'),'TOC \\o "1-2" \\h \\z \\u');r=OxmlElement('w:r');tx=OxmlElement('w:t');tx.text='Update this field in Word to refresh the editable table of contents.';r.append(tx);field.append(r);p._p.append(field)
+p=D.add_paragraph();field=OxmlElement('w:fldSimple');field.set(qn('w:instr'),'TOC \\o "1-1" \\h \\z \\u');r=OxmlElement('w:r');tx=OxmlElement('w:t');tx.text='Update this field in Word to refresh the editable table of contents.';r.append(tx);field.append(r);p._p.append(field)
 contents_placeholder=len(story);story.append(Spacer(1,1));page()
 # Numbered main matter begins in a new DOCX section.
 sec=D.add_section(WD_SECTION_START.CONTINUOUS);sec.footer.is_linked_to_previous=False
@@ -178,21 +189,36 @@ page();para('REFERENCES','h1','REFERENCES')
 for n,(author,title,url) in enumerate(json.loads((OUT/'references.json').read_text()),1):
     para(f'[{n}] {author}, “{title}.” Available: {url}. Accessed: 16 November 2026.')
 page();para('APPENDIX A: CODING','h1','APPENDIX A: CODING')
-para('The following listing reproduces the final Python runtime modules. Legacy demonstration files are excluded. Wrapped long lines are a report presentation convention; the executable source files remain authoritative.')
-for filename in ['encryption.py','peer.py','session.py','network.py','chat_app.py','chat_app1.py','chat_app2.py']:
-    para(filename,'h2')
-    # Preserve indentation with nonbreaking spaces. Keep 12pt body type throughout.
-    for line in (ROOT/filename).read_text().splitlines():
+para('Selected excerpts show the implemented TCP framing and encrypted-message path. The complete runnable source is supplied separately in the project directory. These excerpts are extracted directly from the current source files.')
+
+
+def code_excerpt(filename, qualified_name):
+    source=(ROOT/filename).read_text()
+    node=ast.parse(source)
+    for name in qualified_name.split('.'):
+        node=next(child for child in node.body if isinstance(child, (ast.ClassDef, ast.FunctionDef)) and child.name==name)
+    para(filename+' — '+qualified_name,'h2')
+    code=textwrap.dedent('\n'.join(source.splitlines()[node.lineno-1:node.end_lineno]))
+    style=ParagraphStyle('code',parent=styles['body'],alignment=0,spaceAfter=0,splitLongWords=True)
+    for line in code.splitlines():
         p=D.add_paragraph();p.paragraph_format.space_after=Pt(0)
         p.paragraph_format.alignment=WD_ALIGN_PARAGRAPH.LEFT
         p.add_run(line if line else ' ')
-        safe=escape(line).replace(' ','&#160;') or '&#160;'
-        style=ParagraphStyle('code',parent=styles['body'],alignment=0,spaceAfter=0,splitLongWords=True)
-        story.append(Paragraph(safe,style))
+        story.append(Paragraph(escape(line).replace(' ','&#160;') or '&#160;',style))
+
+
+code_excerpt('network.py', 'ChatConnection.send')
+page()
+para('APPENDIX A: CODING — CONTINUED','h1')
+code_excerpt('network.py', '_recv_exact')
+code_excerpt('session.py', 'SecureSession.send')
+para('The receive helper handles partial TCP reads. SecureSession.send encrypts text before passing it to the transport. The transport then prefixes the JSON byte length and sends the frame, as shown on the previous page.')
 page();para('APPENDIX B: APPLICATION SCREENSHOTS','h1','APPENDIX B: APPLICATION SCREENSHOTS')
-para('These images are actual desktop captures from the GUI check. The chat capture includes a macOS screen-recording permission dialog that obscures part of the window; it has not been edited to hide that limitation. Replace it with an unobstructed capture before final submission if required.')
-for name,caption in [('setup.png','Fig B.1: Required setup and passphrase validation'),('chat.png','Fig B.2: Verified two-way local conversation; operating-system dialog overlaps the view')]:
-    if (ASSETS/name).exists():image(name,caption)
+para('Actual desktop capture from the local two-client check: setup requires a passphrase before starting discovery and chat services.')
+image('setup.png','Fig B.1: Required setup and passphrase validation')
+page();para('APPENDIX B: APPLICATION SCREENSHOTS — CONTINUED','h1')
+para('Actual verified two-way conversation. A macOS screen-recording permission dialog overlaps part of this capture. The image is retained unaltered; an unobstructed capture can replace it before submission.')
+image('chat.png','Fig B.2: Verified two-way local conversation with operating-system dialog')
 # Word should refresh its TOC fields when supported by the editor.
 settings=D.settings.element;update=OxmlElement('w:updateFields');update.set(qn('w:val'),'true');settings.append(update)
 D.core_properties.title=TITLE;D.core_properties.subject='21CSC203P Advanced Programming Practice';D.core_properties.author=identity['students']
@@ -206,13 +232,12 @@ for p in D.paragraphs:
     elif p.text in ('A PROJECT REPORT', 'Submitted by', 'Under the Guidance of',
                     'in partial fulfillment of the requirements for the degree of', 'NOVEMBER 2026'):
         size = 14
-    elif p.text == identity['designation']+'\n'+identity['department']:
+    elif p.text == guide_details:
         size = 12
     for run in p.runs:
         run.font.size = Pt(size)
         if p.text in ('Submitted by', 'Under the Guidance of'):
             run.italic = True
-D.save(OUT/'CLOAK_Project_Report.docx')
 
 # Two-pass PDF pagination; PDF uses the same content, not a DOCX-rendering engine.
 body_page=5
@@ -224,7 +249,7 @@ def footer_pdf(canvas,doc):
     if doc.page>=body_page:canvas.drawCentredString(A4[0]/2,30,str(doc.page-body_page+1))
     canvas.restoreState()
 
-def pdf_doc():return SimpleDocTemplate(str(OUT/'CLOAK_Project_Report.pdf'),pagesize=A4,leftMargin=72,rightMargin=36,topMargin=57.6,bottomMargin=57.6,title=TITLE,author='CLOAK Project')
+def pdf_doc():return SimpleDocTemplate(str(OUT/'CLOAK_Project_Report.pdf'),pagesize=A4,leftMargin=72,rightMargin=36,topMargin=57.6,bottomMargin=57.6,title=TITLE,author=identity['team_name'] or 'CLOAK Project')
 # Contents spans two pages at most; use compact 12pt / 18pt chapter entries only.
 labels=[line[2:].strip() for line in (OUT/'manuscript.md').read_text().splitlines() if line.startswith('# ')]+['REFERENCES','APPENDIX A: CODING','APPENDIX B: APPLICATION SCREENSHOTS']
 first=copy.deepcopy(story);pdf_doc().build(first,onFirstPage=footer_pdf,onLaterPages=footer_pdf)
@@ -240,6 +265,21 @@ summary={'pdf_pages':len(reader.pages),'body_starts_physical_page':page_map[body
          'references_physical_page':page_map['REFERENCES'],
          'body_pages_before_references':page_map['REFERENCES']-page_map[body_start_label],
          'manuscript_words':len((OUT/'manuscript.md').read_text().split()),
-         'references':15,'docx_note':'Editable DOCX uses a refreshable TOC. PDF is separately typeset from identical content; DOCX pagination depends on the editor.'}
+         'references':15,'total_page_target':[30,35],
+         'code_appendix':'Selected excerpts; full source supplied separately',
+         'docx_note':'Editable DOCX uses a refreshable TOC. PDF is separately typeset from identical content; DOCX pagination depends on the editor.'}
 (OUT/'report_validation.json').write_text(json.dumps(summary,indent=2));print(json.dumps(summary,indent=2))
-assert summary['body_pages_before_references']>=30
+assert 30 <= summary['pdf_pages'] <= 35, 'Complete report must contain 30–35 pages'
+# Cache the compact chapter-level contents so the DOCX is readable before refresh.
+# Word can recalculate this field if editing changes its pagination.
+for child in list(field):
+    field.remove(child)
+for index,label in enumerate(labels):
+    run=OxmlElement('w:r')
+    text=OxmlElement('w:t')
+    text.text=label+' . . . '+str(page_map[label]-body_page+1)
+    run.append(text)
+    if index < len(labels)-1:
+        run.append(OxmlElement('w:br'))
+    field.append(run)
+D.save(OUT/'CLOAK_Project_Report.docx')

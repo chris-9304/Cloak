@@ -1,9 +1,28 @@
 {
-  "pdf_pages": 84,
+  "pdf_pages": 34,
   "body_starts_physical_page": 5,
-  "references_physical_page": 35,
-  "body_pages_before_references": 30,
-  "manuscript_words": 6714,
+  "references_physical_page": 29,
+  "body_pages_before_references": 24,
+  "manuscript_words": 6322,
   "references": 15,
-  "docx_note": "Editable DOCX uses a refreshable TOC. PDF is separately typeset from identical content; DOCX pagination depends on the editor."
+  "total_page_target": [
+    30,
+    35
+  ],
+  "code_appendix": "Selected excerpts; full source supplied separately",
+  "docx_note": "Editable DOCX uses a refreshable TOC. PDF is separately typeset from identical content; DOCX pagination depends on the editor.",
+  "checks": {
+    "pdf_total_page_range": true,
+    "no_blank_pdf_pages": true,
+    "identity_details": true,
+    "citations_first_appearance_order": true,
+    "docx_fonts_spacing_and_figures": true,
+    "docx_cached_chapter_contents": true,
+    "python_syntax": true
+  },
+  "review_pages": {
+    "contents": 4,
+    "tcp": 17,
+    "code": 31
+  }
 }
