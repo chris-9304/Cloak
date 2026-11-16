@@ -37,7 +37,7 @@ class EncryptionManager:
                 algorithm=hashes.SHA256(),
                 length=32,
                 salt=self.salt,
-                iterations=100_000,
+                iterations=1_200_000,
             )
             self.key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
             self.cipher = Fernet(self.key)

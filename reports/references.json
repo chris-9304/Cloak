@@ -1,0 +1,17 @@
+[
+ ["Python Software Foundation", "tkinter — Python interface to Tcl/Tk", "https://docs.python.org/3/library/tkinter.html"],
+ ["Python Software Foundation", "socket — Low-level networking interface", "https://docs.python.org/3/library/socket.html"],
+ ["Python Software Foundation", "threading — Thread-based parallelism", "https://docs.python.org/3/library/threading.html"],
+ ["Python Software Foundation", "queue — A synchronized queue class", "https://docs.python.org/3/library/queue.html"],
+ ["United Nations", "Sustainable Development Goal 9: Industry, Innovation and Infrastructure", "https://sdgs.un.org/goals/goal9"],
+ ["Python Software Foundation", "json — JSON encoder and decoder", "https://docs.python.org/3/library/json.html"],
+ ["Python Software Foundation", "struct — Interpret bytes as packed binary data", "https://docs.python.org/3/library/struct.html"],
+ ["Python Cryptographic Authority", "Fernet (symmetric encryption)", "https://cryptography.io/en/latest/fernet/"],
+ ["Python Cryptographic Authority", "Key derivation functions: PBKDF2HMAC", "https://cryptography.io/en/latest/hazmat/primitives/key-derivation-functions/"],
+ ["python-docx contributors", "python-docx 1.2.0 documentation", "https://python-docx.readthedocs.io/en/latest/"],
+ ["W. Eddy, Ed.", "RFC 9293: Transmission Control Protocol (TCP), 2022", "https://www.rfc-editor.org/rfc/rfc9293"],
+ ["J. Postel", "RFC 768: User Datagram Protocol, 1980", "https://www.rfc-editor.org/rfc/rfc768"],
+ ["T. Bray, Ed.", "RFC 8259: The JavaScript Object Notation (JSON) Data Interchange Format, 2017", "https://www.rfc-editor.org/rfc/rfc8259"],
+ ["K. Moriarty et al.", "RFC 8018: PKCS #5: Password-Based Cryptography Specification Version 2.1, 2017", "https://www.rfc-editor.org/rfc/rfc8018"],
+ ["Python Software Foundation", "unittest — Unit testing framework", "https://docs.python.org/3/library/unittest.html"]
+]

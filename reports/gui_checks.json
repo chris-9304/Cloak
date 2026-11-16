@@ -1,0 +1,11 @@
+{
+  "setup_validation": true,
+  "composer_disabled_before_verification": true,
+  "automatic_discovery": true,
+  "bidirectional_gui_chat": true,
+  "minimum_size_composer_visible": true,
+  "disconnect_resets_composer": true,
+  "reconnect": true,
+  "wrong_password_rejected": true,
+  "elapsed_seconds": 5.55
+}

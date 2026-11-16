@@ -48,7 +48,7 @@ class Peer:
 
 
 class PeerManager:
-    """Thread-safe registry of discovered peers."""
+    """Registry of discovered peers; owned by the GUI event thread."""
 
     def __init__(self):
         self.peers: dict[str, Peer] = {}   # uid → Peer

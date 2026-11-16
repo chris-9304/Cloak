@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
-║  GHOST_LINK v0.1  //  ENCRYPTED P2P CHAT PROTOCOL           ║
+║  CLOAK v2.0  //  ENCRYPTED P2P CHAT PROTOCOL           ║
 ║  Real LAN peer discovery + Fernet-encrypted TCP messaging    ║
-║  Cyberpunk terminal UI inspired by CAPRION_OS                ║
+║  Cyberpunk terminal UI inspired by EDGERUNNERS                ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Usage:
@@ -20,16 +20,17 @@ import os
 import socket
 import time
 import threading
+import queue
+import ipaddress
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from encryption import EncryptionManager
+from session import SecureSession
 from network import (
     DiscoveryService,
-    ChatConnection,
     TCPListener,
     _get_local_ip,
     DEFAULT_TCP_PORT,
@@ -39,23 +40,23 @@ from peer import Peer, PeerManager
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  CAPRION_OS colour palette
+#  EDGERUNNERS colour palette
 # ═══════════════════════════════════════════════════════════════════
 BG_DARK         = "#0a0a0f"      # deepest background
 BG_PANEL        = "#0f0f18"      # panel / card background
 BG_INPUT        = "#14141f"      # input fields
 FG              = "#c8c8d0"      # primary text
-FG_DIM          = "#555566"      # muted / secondary text
+FG_DIM          = "#9197aa"      # muted / secondary text
 FG_BRIGHT       = "#e0e0e8"      # bright text
-PINK            = "#ff0055"      # primary accent — hot pink
-PINK_DIM        = "#aa0038"      # dimmed pink
-GREEN           = "#00ff41"      # neon green — status, online
+PINK            = "#e8f547"      # primary accent — signal yellow
+PINK_DIM        = "#a0ab28"      # dimmed pink
+GREEN           = "#49dfbb"      # neon green — status, online
 GREEN_DIM       = "#009926"      # dimmed green
 CYAN            = "#00e5ff"      # cyan for highlights
 YELLOW          = "#ffcc00"      # warnings
 RED             = "#ff2244"      # errors, danger
-BORDER          = "#1a1a2e"      # panel borders
-BORDER_ACCENT   = "#2a1a28"      # subtle pink-tinted border
+BORDER          = "#282d40"      # panel borders
+BORDER_ACCENT   = "#35394b"      # muted border
 FONT            = "Menlo" if sys.platform == "darwin" else "Consolas"
 FONT_ALT        = "Courier"
 CORNER_R        = 14             # rounded corner radius
@@ -118,7 +119,7 @@ class RoundedPanel(tk.Canvas):
 class CyberButton(tk.Canvas):
     def __init__(self, parent, text="", command=None,
                  bg_color=PINK, fg_color="#0a0a0f", hover_color=None,
-                 disabled_bg="#1a1a2e", disabled_fg="#555566",
+                 disabled_bg="#282d40", disabled_fg="#9197aa",
                  font_cfg=(FONT, 10, "bold"), radius=8,
                  padx=16, pady=5, **kw):
         self._text = text
@@ -145,7 +146,12 @@ class CyberButton(tk.Canvas):
         self.bind("<Configure>", self._draw)
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
+        self.configure(takefocus=True)
         self.bind("<Button-1>", self._click)
+        self.bind("<Return>", self._click)
+        self.bind("<space>", self._click)
+        self.bind("<FocusIn>", lambda e: self.configure(highlightthickness=2, highlightbackground=CYAN))
+        self.bind("<FocusOut>", lambda e: self.configure(highlightthickness=0))
 
     def _draw(self, _e=None, fill=None, fg=None):
         self.delete("all")
@@ -192,11 +198,8 @@ class ChatApp:
         self.discovery_port = discovery_port
         self.username = preset_name or ""
         self.password = ""
-        self.encryption = EncryptionManager()
-        self._peer_enc: Optional[EncryptionManager] = None
         self.peer_manager = PeerManager()
-        self.connection: Optional[ChatConnection] = None
-        self._handshake_sent = False
+        self.connection: Optional[SecureSession] = None
         self.listener: Optional[TCPListener] = None
         self.discovery: Optional[DiscoveryService] = None
         self.local_ip = _get_local_ip()
@@ -207,47 +210,33 @@ class ChatApp:
         # Initialize UI components and setup the root window
         self._setup_root()
 
-        # If we have a preset name, skip setup and go directly to main UI
-        if self.username:
-            # Setup already complete - go to main UI directly
-            self.name_var = tk.StringVar()
-            self.pass_var = tk.StringVar()
+        self._events = queue.Queue()
+        self._state = "disconnected"
+        self._show_setup_screen()
+        self.setup_name_var.set(self.username)
+        self._poll_events()
 
-            # Set up encryption
-            if self.encryption.set_password(self.password):
-                self.enc_status = tk.Label(
-                    self.root,
-                    text="■ CIPHER ONLINE  //  FERNET-AES",
-                    bg=BG_PANEL,
-                    fg=GREEN,
-                    font=(FONT, 9),
-                    anchor="w"
-                )
-            else:
-                self.enc_status = tk.Label(
-                    self.root,
-                    text="■ KEY DERIVATION FAILED",
-                    bg=BG_PANEL,
-                    fg=RED,
-                    font=(FONT, 9),
-                    anchor="w"
-                )
+    def _poll_events(self):
+        if not self._running:
+            return
+        for _ in range(100):
+            try:
+                callback, args = self._events.get_nowait()
+            except queue.Empty:
+                break
+            callback(*args)
+        self.root.after(40, self._poll_events)
 
-            self._build_ui()
-            self._start_services()
-            self._tick_clock()
-            self.name_var.set(self.username)
-            self._on_name_set()
-        else:
-            # Show setup screen first
-            self._show_setup_screen()
+    def _post(self, callback, *args):
+        if self._running:
+            self._events.put((callback, args))
 
     # ── root config ─────────────────────────────────────────────────
 
     def _setup_root(self):
         self.root.title("CLOAK // ENCRYPTED P2P")
-        self.root.geometry("980x720")
-        self.root.minsize(760, 560)
+        self.root.geometry("1100x820")
+        self.root.minsize(940, 760)
         self.root.configure(bg=BG_DARK)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -280,7 +269,7 @@ class ChatApp:
             fg=PINK,
             font=(FONT, 24, "bold")
         )
-        title_label.pack(pady=(100, 20))
+        title_label.pack(pady=(65, 15))
 
         # Subtitle
         subtitle_label = tk.Label(
@@ -290,10 +279,10 @@ class ChatApp:
             fg=FG_DIM,
             font=(FONT, 12)
         )
-        subtitle_label.pack(pady=(0, 50))
+        subtitle_label.pack(pady=(0, 25))
 
         # Setup panel
-        panel_frame = tk.Frame(setup_frame, bg=BG_PANEL, relief="raised", bd=1)
+        panel_frame = tk.Frame(setup_frame, bg=BG_PANEL, highlightbackground=BORDER, highlightthickness=1)
         panel_frame.pack(pady=20, padx=40, fill=tk.X, expand=False)
 
         # Username input
@@ -351,18 +340,8 @@ class ChatApp:
         self.setup_pass_entry.bind("<Return>", lambda e: self._setup_complete())
 
         # Show/Hide button
-        self.setup_show_pass_btn = tk.Button(
-            pass_frame,
-            text="SHOW",
-            command=self._toggle_password_visibility,
-            bg=BORDER,
-            fg=FG_DIM,
-            font=(FONT, 8),
-            relief="flat",
-            bd=0,
-            padx=5,
-            pady=2
-        )
+        self.setup_show_pass_btn = self._mkbtn(
+            pass_frame, "SHOW", self._toggle_password_visibility, CYAN)
         self.setup_show_pass_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
         # Error label
@@ -376,18 +355,7 @@ class ChatApp:
         self.setup_error_label.pack(pady=(0, 15), padx=20)
 
         # Setup button
-        setup_btn = tk.Button(
-            panel_frame,
-            text="INITIALIZE CLOAK",
-            command=self._setup_complete,
-            bg=PINK,
-            fg="#0a0a0f",
-            font=(FONT, 10, "bold"),
-            relief="flat",
-            bd=0,
-            padx=20,
-            pady=5
-        )
+        setup_btn = self._mkbtn(panel_frame, "INITIALIZE CLOAK", self._setup_complete, PINK)
         setup_btn.pack(pady=(0, 20))
 
         # Focus on name entry
@@ -397,10 +365,10 @@ class ChatApp:
         """Toggle password visibility in the setup screen."""
         if self.setup_pass_entry.cget("show") == "█":
             self.setup_pass_entry.configure(show="")
-            self.setup_show_pass_btn.configure(text="HIDE")
+            self.setup_show_pass_btn.set_text("HIDE")
         else:
             self.setup_pass_entry.configure(show="█")
-            self.setup_show_pass_btn.configure(text="SHOW")
+            self.setup_show_pass_btn.set_text("SHOW")
 
     def _setup_complete(self):
         """Complete the setup process and initialize the main UI."""
@@ -408,8 +376,8 @@ class ChatApp:
         password = self.setup_pass_var.get()
 
         # Validate inputs
-        if not name:
-            self.setup_error_label.configure(text="Enter a callsign")
+        if not 1 <= len(name) <= 64:
+            self.setup_error_label.configure(text="Enter a callsign (1–64 characters)")
             return
 
         if not password:
@@ -428,32 +396,15 @@ class ChatApp:
         self.name_var = tk.StringVar()
         self.pass_var = tk.StringVar()
 
-        # Set up encryption
-        if self.encryption.set_password(password):
-            self.enc_status = tk.Label(
-                self.root,
-                text="■ CIPHER ONLINE  //  FERNET-AES",
-                bg=BG_PANEL,
-                fg=GREEN,
-                font=(FONT, 9),
-                anchor="w"
-            )
-        else:
-            self.enc_status = tk.Label(
-                self.root,
-                text="■ KEY DERIVATION FAILED",
-                bg=BG_PANEL,
-                fg=RED,
-                font=(FONT, 9),
-                anchor="w"
-            )
-
-        # Build the main UI
         self._build_ui()
+        self.name_var.set(self.username)
+        self.id_status.configure(text=f"[ {self.username.upper()} ]", fg=CYAN)
+        self.enc_status.configure(text="■ PASSPHRASE SET", fg=CYAN)
+        self._reset_ui()
         self._start_services()
         self._tick_clock()
-        self.name_var.set(self.username)
-        self._on_name_set()
+        self._sys("Choose a discovered peer or enter an IPv4 address and port.")
+        self._sys("Use the same private passphrase on both devices.")
 
     # ── build UI ────────────────────────────────────────────────────
 
@@ -465,11 +416,11 @@ class ChatApp:
                  font=(FONT, 10)).pack(side=tk.LEFT)
         tk.Label(topbar, text="  CLOAK", bg=BG_DARK, fg=PINK,
                  font=(FONT, 11, "bold")).pack(side=tk.LEFT)
-        tk.Label(topbar, text=" v0.1", bg=BG_DARK, fg=FG_DIM,
+        tk.Label(topbar, text=" v2.0", bg=BG_DARK, fg=FG_DIM,
                  font=(FONT, 9)).pack(side=tk.LEFT)
         tk.Label(topbar, text="ENCRYPTED P2P PROTOCOL", bg=BG_DARK, fg=FG_DIM,
                  font=(FONT, 9)).pack(side=tk.LEFT, padx=(30, 0))
-        self.link_label = tk.Label(topbar, text="LINK ESTABLISHING", bg=BG_DARK,
+        self.link_label = tk.Label(topbar, text="AWAITING CONNECTION", bg=BG_DARK,
                                     fg=YELLOW, font=(FONT, 9))
         self.link_label.pack(side=tk.RIGHT)
 
@@ -544,11 +495,21 @@ class ChatApp:
         # Peer list
         self.peer_listbox = tk.Listbox(
             sb, bg=BG_INPUT, fg=FG, selectbackground=PINK,
-            selectforeground="#0a0a0f", font=(FONT, 10),
+            selectforeground="#0a0a0f", font=(FONT, 10), height=4,
             bd=0, highlightthickness=1, highlightcolor=PINK,
             highlightbackground=BORDER, activestyle="none", relief="flat")
         self.peer_listbox.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
         self.peer_listbox.bind("<<ListboxSelect>>", self._on_peer_select)
+
+        direct = tk.Frame(sb, bg=BG_PANEL)
+        direct.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(direct, text="DIRECT IPv4 : PORT", bg=BG_PANEL, fg=FG_DIM,
+                 font=(FONT, 8)).pack(anchor="w")
+        self.direct_var = tk.StringVar(value="127.0.0.1:5002")
+        tk.Entry(direct, textvariable=self.direct_var, bg=BG_INPUT, fg=FG_BRIGHT,
+                 insertbackground=CYAN, relief="flat", font=(FONT, 10)).pack(fill=tk.X, ipady=5)
+        self.direct_btn = self._mkbtn(direct, "CONNECT DIRECT", self._on_direct, CYAN)
+        self.direct_btn.pack(fill=tk.X, pady=(4, 0))
 
         # Connect / Disconnect
         btn_row = tk.Frame(sb, bg=BG_PANEL)
@@ -584,8 +545,8 @@ class ChatApp:
         ch = tk.Frame(cp, bg=BG_PANEL)
         ch.grid(row=0, column=0, sticky="ew")
 
-        self._section_header_inline(ch, "05", "NEURAL_LINK / CHAT")
-        self.protocol_label = tk.Label(ch, text="AES-256", bg=BG_PANEL, fg=FG_DIM,
+        self._section_header_inline(ch, "05", "PRIVATE CHANNEL")
+        self.protocol_label = tk.Label(ch, text="FERNET / AES-128", bg=BG_PANEL, fg=FG_DIM,
                                         font=(FONT, 8))
         self.protocol_label.pack(side=tk.RIGHT, padx=(0, 4))
         self.enc_proto = tk.Label(ch, text="UTF-8 /", bg=BG_PANEL, fg=FG_DIM,
@@ -660,7 +621,7 @@ class ChatApp:
         self.pkt_label = tk.Label(pkt_row, text="PACKETS  0", bg=BG_PANEL,
                                    fg=FG_DIM, font=(FONT, 8), anchor="w")
         self.pkt_label.pack(side=tk.LEFT)
-        self.conn_sec_label = tk.Label(pkt_row, text="CONNECTION SECURE ■",
+        self.conn_sec_label = tk.Label(pkt_row, text="PASSWORD UNVERIFIED",
                                         bg=BG_PANEL, fg=FG_DIM, font=(FONT, 8), anchor="e")
         self.conn_sec_label.pack(side=tk.RIGHT)
         self._pkt_count = 0
@@ -711,25 +672,35 @@ class ChatApp:
 
     def _start_services(self):
         self.listener = TCPListener(self.tcp_port, self._on_incoming)
-        self.listener.start()
+        listening = True
+        try:
+            self.listener.start()
+        except OSError as exc:
+            listening = False
+            self.listener.stop()
+            self._err(f"Cannot listen on port {self.tcp_port}: {exc}. Restart with --port PORT.")
+            self._status("LISTENER UNAVAILABLE — outbound connections remain available")
 
         name = self.username or f"NODE-{self.tcp_port}"
         self.discovery = DiscoveryService(
             username=name, tcp_port=self.tcp_port,
             discovery_port=self.discovery_port,
             on_peer_found=self._on_peer_found)
+        self.discovery.on_error = lambda message: self._post(self._err, message)
         self.discovery.start()
         self._schedule_prune()
-        self._status(f"LISTENING {self.local_ip}:{self.tcp_port}")
+        if listening:
+            self._status(f"LISTENING {self.local_ip}:{self.tcp_port}")
         # Start periodic scanning
-        self._start_periodic_scan()
+        # Discovery already broadcasts every three seconds.
 
     def _on_peer_found(self, name, ip, port):
-        p = Peer(name, ip, port)
-        is_new = self.peer_manager.upsert(p)
-        self.root.after(0, self._refresh_peers)
-        if is_new:
-            self.root.after(0, lambda: self._sys(f"DISCOVERED {name} @ {ip}:{port}"))
+        self._post(self._register_peer, name, ip, port)
+
+    def _register_peer(self, name, ip, port):
+        if self.peer_manager.upsert(Peer(name, ip, port)):
+            self._sys(f"DISCOVERED {name} @ {ip}:{port}")
+        self._refresh_peers()
 
     def _schedule_prune(self):
         if not self._running:
@@ -756,20 +727,23 @@ class ChatApp:
                     break
 
     def _on_incoming(self, client_sock, addr):
-        if self.connection and self.connection.is_alive:
+        if not self._running:
             client_sock.close()
             return
-        conn = ChatConnection(on_message=self._on_msg, on_disconnect=self._on_disc)
-        conn.accept(client_sock)
-        self.connection = conn
-        self._handshake_sent = False
-        self.root.after(0, lambda: self._finalize(f"{addr[0]}:{addr[1]}", incoming=True))
+        self._post(self._accept_session, client_sock, addr)
 
-    # ── GUI events ──────────────────────────────────────────────────
+    def _accept_session(self, client_sock, addr):
+        if self._state != "disconnected":
+            client_sock.close()
+            return
+        self._begin_session(client=client_sock)
 
     def _on_name_set(self):
+        if self._state != "disconnected":
+            self._err("Disconnect before changing the callsign")
+            return
         n = self.name_var.get().strip()
-        if not n:
+        if not 1 <= len(n) <= 64:
             messagebox.showwarning("IDENTITY", "Enter a callsign.")
             return
         self.username = n
@@ -780,17 +754,17 @@ class ChatApp:
         self._status(f"IDENTITY: {n.upper()}")
 
     def _on_password_set(self):
+        if self._state != "disconnected":
+            self._err("Disconnect before changing the passphrase")
+            return
         pw = self.pass_var.get()
         if not pw:
-            messagebox.showwarning("ENCRYPTION", "Enter a passphrase.")
+            self._err("Enter a passphrase")
             return
         self.password = pw
-        if self.encryption.set_password(pw):
-            self.enc_status.configure(text="■ CIPHER ONLINE  //  FERNET-AES", fg=GREEN)
-            self._status("ENCRYPTION KEY DERIVED")
-            self.conn_sec_label.configure(text="CONNECTION SECURE ■", fg=GREEN)
-        else:
-            self.enc_status.configure(text="■ KEY DERIVATION FAILED", fg=RED)
+        self.pass_var.set("")
+        self.enc_status.configure(text="■ PASSPHRASE SET", fg=CYAN)
+        self._status("PASSPHRASE UPDATED")
 
     def _on_scan(self):
         if not self.discovery:
@@ -811,172 +785,122 @@ class ChatApp:
 
         self.root.after(2000, done)
 
-    def _start_periodic_scan(self):
-        """Start periodic network scanning every 3-5 seconds."""
-        self._schedule_periodic_scan()
+    def _on_peer_select(self, _e=None):
+        self.conn_btn.set_enabled(bool(self.peer_listbox.curselection()) and self._state == "disconnected")
 
-    def _schedule_periodic_scan(self):
-        """Schedule the next periodic scan."""
-        if not self._running:
+    def _on_direct(self):
+        try:
+            host, port = self.direct_var.get().strip().rsplit(":", 1)
+            host = str(ipaddress.IPv4Address(host))
+            port = int(port)
+            if not 1 <= port <= 65535:
+                raise ValueError()
+        except ValueError:
+            self._err("Enter an IPv4 address and port, for example 192.168.1.20:5001")
             return
-
-        def scan():
-            if self.discovery:
-                self.discovery.scan()
-            # Schedule next scan in 3-5 seconds (randomized)
-            delay = 3000 + (2000 * hash(str(time.time())) % 1000)  # Random between 3-5 seconds
-            self._scan_timer = self.root.after(delay, self._schedule_periodic_scan)
-
-        # Schedule the first scan immediately
-        self.root.after(100, scan)
-
-    def _on_peer_select(self, _e):
-        sel = self.peer_listbox.curselection()
-        can = bool(sel) and not (self.connection and self.connection.is_alive)
-        self.conn_btn.set_enabled(can)
+        self._begin_session(host, port)
 
     def _on_connect(self):
-        sel = self.peer_listbox.curselection()
-        if not sel:
-            return
-        if not self.username:
-            messagebox.showwarning("IDENTITY", "Set callsign first.")
-            return
-        if not self.encryption.cipher:
-            messagebox.showwarning("ENCRYPTION", "Set passphrase first.")
-            return
+        selection = self.peer_listbox.curselection()
         peers = self.peer_manager.all_peers()
-        idx = sel[0]
-        if idx >= len(peers):
+        if selection and selection[0] < len(peers):
+            peer = peers[selection[0]]
+            self._begin_session(peer.ip_address, peer.port)
+
+    def _begin_session(self, host=None, port=None, client=None):
+        if self._state != "disconnected":
+            if client:
+                client.close()
             return
-        peer = peers[idx]
-        self._status(f"CONNECTING TO {peer}...")
+        self._state = "verifying" if client else "connecting"
+        session = SecureSession(self.password, self.username,
+            lambda kind, data: self._post(self._session_event, session, kind, data))
+        self.connection = session
         self.conn_btn.set_enabled(False)
-
-        def go():
-            conn = ChatConnection(on_message=self._on_msg, on_disconnect=self._on_disc)
-            if conn.connect(peer.ip_address, peer.port):
-                self.connection = conn
-                self._handshake_sent = True
-                conn.send(ChatConnection.MSG_HANDSHAKE, {
-                    "name": self.username,
-                    "salt": self.encryption.get_salt().hex()})
-                self.root.after(0, lambda: self._finalize(str(peer)))
-            else:
-                self.root.after(0, lambda: self._err(f"CONNECT FAILED: {peer}"))
-                self.root.after(0, lambda: self._status("CONNECTION FAILED"))
-                self.root.after(0, lambda: self.conn_btn.set_enabled(True))
-
-        threading.Thread(target=go, daemon=True).start()
-
-    def _finalize(self, label, incoming=False):
-        d = "INBOUND" if incoming else "OUTBOUND"
-        self.conn_indicator.configure(fg=GREEN)
-        self.conn_text.configure(text=f" PROTOCOL ACTIVE", fg=GREEN)
-        self.chat_peer.configure(text=label)
-        self.send_btn.set_enabled(True)
-        self.msg_entry.configure(state=tk.NORMAL)
-        self.conn_btn.set_enabled(False)
+        self.direct_btn.set_enabled(False)
         self.disc_btn.set_enabled(True)
-        self.link_label.configure(text="LINK ESTABLISHED ■ ■", fg=GREEN)
-        self._proto(f"{d} UPLINK ESTABLISHED. STAY IN THE SIGNAL.")
-        self._status(f"CONNECTED: {label}")
+        self.link_label.configure(text="VERIFYING PASSPHRASE", fg=YELLOW)
+        self.conn_text.configure(text=" CONNECTING / VERIFYING", fg=YELLOW)
+        self._status("VERIFYING INCOMING PEER" if client else f"CONNECTING {host}:{port}")
+        threading.Thread(target=session.start, kwargs=dict(host=host, port=port, client=client), daemon=True).start()
+
+    def _session_event(self, session, kind, data):
+        if session is not self.connection:
+            return
+        if kind == "ready":
+            self._state = "connected"
+            self.conn_indicator.configure(fg=GREEN)
+            self.conn_text.configure(text=" CONNECTED", fg=GREEN)
+            self.chat_peer.configure(text=data)
+            self.send_btn.set_enabled(True)
+            self.msg_entry.configure(state=tk.NORMAL)
+            self.link_label.configure(text="ENCRYPTED CHANNEL", fg=GREEN)
+            self.conn_sec_label.configure(text="PASSWORD VERIFIED", fg=GREEN)
+            self._status(f"CONNECTED: {data}")
+            self._proto("Shared password verified. Encrypted channel ready.")
+            self.msg_entry.focus_set()
+        elif kind == "message":
+            self._peer_msg(*data)
+            self._count_packet()
+        elif kind == "error":
+            self.connection = None
+            self._reset_ui()
+            self._err(data)
+            self._status(data)
 
     def _on_disconnect(self):
-        if self.connection:
-            self.connection.close()
-            self.connection = None
-        self._handshake_sent = False
-        self._peer_enc = None
+        session, self.connection = self.connection, None
+        if session:
+            session.close()
         self._reset_ui()
-        self._sys("UPLINK TERMINATED")
         self._status("DISCONNECTED")
-
-    def _on_disc(self):
-        self.connection = None
-        self._handshake_sent = False
-        self._peer_enc = None
-        self.root.after(0, self._reset_ui)
-        self.root.after(0, lambda: self._sys("PEER DROPPED — UPLINK LOST"))
-        self.root.after(0, lambda: self._status("PEER DISCONNECTED"))
+        self._sys("Channel closed")
 
     def _reset_ui(self):
-        self.conn_indicator.configure(fg=RED)
-        self.conn_text.configure(text=" PROTOCOL STANDBY", fg=FG_DIM)
+        self._state = "disconnected"
+        self.conn_indicator.configure(fg=FG_DIM)
+        self.conn_text.configure(text=" AWAITING CONNECTION", fg=FG_DIM)
         self.chat_peer.configure(text="")
         self.send_btn.set_enabled(False)
+        self.msg_entry.configure(state=tk.DISABLED)
         self.disc_btn.set_enabled(False)
-        self.link_label.configure(text="LINK DOWN", fg=RED)
-        self.conn_sec_label.configure(fg=FG_DIM)
+        self.direct_btn.set_enabled(True)
+        self._on_peer_select()
+        self.link_label.configure(text="OFFLINE", fg=FG_DIM)
+        self.conn_sec_label.configure(text="PASSWORD UNVERIFIED", fg=FG_DIM)
 
-    # ── send / receive ──────────────────────────────────────────────
+    def _count_packet(self):
+        self._pkt_count += 1
+        self.pkt_label.configure(text=f"PACKETS  {self._pkt_count}")
 
     def _on_send(self):
-        msg = self.msg_var.get().strip()
-        if not msg:
+        message = self.msg_var.get().strip()
+        if not message or self._state != "connected":
             return
-        if not self.connection or not self.connection.is_alive:
-            self._err("NO ACTIVE UPLINK")
+        if len(message.encode()) > 65536:
+            self._err("Message is too long (maximum 64 KiB)")
             return
-        if not self.encryption.cipher:
-            self._err("CIPHER OFFLINE — SET PASSPHRASE")
-            return
-        try:
-            enc = self.encryption.encrypt_message(msg)
-            ok = self.connection.send(ChatConnection.MSG_CHAT, {
-                "name": self.username, "cipher": enc.decode()})
-            if ok:
-                self._own_msg(msg)
-                self.msg_var.set("")
-                self._pkt_count += 1
-                self.pkt_label.configure(text=f"PACKETS  {self._pkt_count}")
-            else:
-                self._err("TRANSMIT FAILED — UPLINK MAY BE LOST")
-        except Exception as e:
-            self._err(f"TRANSMIT ERROR: {e}")
+        session = self.connection
+        # Socket writes stay off the Tk event loop.
+        def send():
+            ok = session.send(message)
+            self._post(self._sent, session, message, ok)
+        self.send_btn.set_enabled(False)
+        self.msg_entry.configure(state=tk.DISABLED)
+        threading.Thread(target=send, daemon=True).start()
 
-    def _on_msg(self, mt, data):
-        if mt == ChatConnection.MSG_HANDSHAKE:
-            n = data.get("name", "UNKNOWN")
-            s = data.get("salt", "")
-            self.root.after(0, lambda: self._do_handshake(n, s))
-        elif mt == ChatConnection.MSG_CHAT:
-            self.root.after(0, lambda: self._do_chat(data))
-
-    def _do_handshake(self, name, salt_hex):
-        self._proto(f"HANDSHAKE FROM {name.upper()}")
-        self.chat_peer.configure(text=name)
-        if not self._handshake_sent and self.connection and self.encryption.cipher:
-            self._handshake_sent = True
-            self.connection.send(ChatConnection.MSG_HANDSHAKE, {
-                "name": self.username,
-                "salt": self.encryption.get_salt().hex()})
-        if salt_hex and self.password:
-            try:
-                pe = EncryptionManager()
-                pe.set_password(self.password, salt=bytes.fromhex(salt_hex))
-                self._peer_enc = pe
-            except Exception:
-                pass
-
-    def _do_chat(self, data):
-        name = data.get("name", "PEER")
-        ct = data.get("cipher", "")
-        if not ct:
+    def _sent(self, session, message, ok):
+        if session is not self.connection or self._state != "connected":
             return
-        plain = None
-        cb = ct.encode()
-        for enc in [self._peer_enc, self.encryption]:
-            if enc and enc.cipher:
-                plain = enc.try_decrypt(cb)
-                if plain:
-                    break
-        if plain:
-            self._peer_msg(name, plain)
-            self._pkt_count += 1
-            self.pkt_label.configure(text=f"PACKETS  {self._pkt_count}")
+        self.send_btn.set_enabled(True)
+        self.msg_entry.configure(state=tk.NORMAL)
+        if ok:
+            self._own_msg(message)
+            self.msg_var.set("")
+            self._count_packet()
         else:
-            self._err(f"DECRYPT FAILED FROM {name} — PASSPHRASE MISMATCH?")
+            self._err("Transmit failed; reconnect to the peer")
+            self._on_disconnect()
 
     # ── chat display ────────────────────────────────────────────────
 
@@ -1035,13 +959,19 @@ class ChatApp:
             self.listener.stop()
         if self.discovery:
             self.discovery.stop()
+        for timer in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+            self.root.after_cancel(timer)
+        while not self._events.empty():
+            callback, args = self._events.get_nowait()
+            if callback == self._accept_session:
+                args[0].close()
         self.root.destroy()
 
 
 # ── Entry point ─────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="GHOST_LINK // Encrypted P2P Chat")
+    parser = argparse.ArgumentParser(description="CLOAK // Encrypted P2P Chat")
     parser.add_argument("--port", type=int, default=DEFAULT_TCP_PORT)
     parser.add_argument("--discovery-port", type=int, default=DISCOVERY_PORT)
     parser.add_argument("--name", type=str, default="")

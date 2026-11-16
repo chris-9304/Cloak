@@ -1,95 +1,63 @@
-# Encrypted Chat Application — Documentation
+# CLOAK — encrypted LAN chat
 
-## Overview
+A Python/Tkinter desktop chat application with an Edgerunners-inspired dark yellow/cyan interface. One active peer per instance. UDP discovery and direct IPv4 connections feed a password-confirmed, Fernet-encrypted TCP session.
 
-A **real peer-to-peer encrypted chat** application for devices on the same local network. Peers automatically discover each other via UDP broadcast and communicate over TCP with end-to-end Fernet encryption.
+## Setup and run
 
-## Quick Start
+Requires Python 3.10+ with Tkinter. The checked environment is Python 3.15.2, Tk 9.1 and cryptography 50.0.2 on macOS.
 
-### Prerequisites
-```bash
-pip install cryptography
+```sh
+python3 -m venv chat_env
+source chat_env/bin/activate
+python -m pip install -r requirements.txt
+python chat_app.py --name Lucy
 ```
 
-### Run on two different machines (same LAN)
-```bash
-# Machine A
-python3 chat_app.py --name Alice
+Every launcher opens setup. `--name` only prefills the callsign. Enter the same strong private passphrase on both clients. Do not share it in the chat or screenshots.
 
-# Machine B
-python3 chat_app.py --name Bob
+For two clients on one machine, run these in separate terminals:
+
+```sh
+python chat_app1.py
+python chat_app2.py
 ```
 
-### Test locally on the same machine
-```bash
-# Terminal 1
-python3 chat_app1.py
+Alice listens on TCP 5001 and Bob on TCP 5002. Select a discovered peer or enter `127.0.0.1:5002` from Alice. Connect from one side and wait for **PASSWORD VERIFIED** before sending.
 
-# Terminal 2
-python3 chat_app2.py
+For two machines, use the same permitted LAN and the remote machine's IPv4 address. Firewalls must allow the chosen TCP port and UDP discovery port. Broadcast filtering or Wi-Fi client isolation can prevent discovery; use direct connection to distinguish discovery failure from TCP reachability. A physical two-device LAN check remains pending.
+
+```sh
+python chat_app.py --port 5002 --discovery-port 5000 --name David
 ```
 
-Both windows will automatically discover each other. Set the **same encryption password** on both sides, select the peer, and click **Connect**.
+## Architecture and protocol
 
-## Architecture
+- `chat_app.py`: Tkinter UI and main-thread event queue; offline/pending/connected controls.
+- `session.py`: protocol v2, password confirmation, timeouts, encrypted chat.
+- `network.py`: UDP advertisements, TCP listener, framed JSON transport.
+- `encryption.py`: PBKDF2-HMAC-SHA256 (1,200,000 iterations, random 16-byte salt) and Fernet.
+- `peer.py`: endpoint registry and freshness, owned by the GUI thread.
 
-```
-┌─────────────┐         UDP broadcast          ┌─────────────┐
-│  chat_app1  │ ◄──────────────────────────────► │  chat_app2  │
-│  (Alice)    │         discovery beacons        │  (Bob)      │
-│  port 5001  │                                  │  port 5002  │
-│             │ ◄──────── TCP connection ───────► │             │
-│             │      length-prefixed JSON        │             │
-│             │      + Fernet-encrypted msgs     │             │
-└─────────────┘                                  └─────────────┘
-```
+Discovery broadcasts every three seconds (default UDP 5000); stale entries are pruned after twelve seconds at the next pruning pass. A manual scan sends an additional short burst. Chat uses `[4-byte big-endian payload length][UTF-8 JSON]`, with a 1 MiB envelope limit. The GUI limits outgoing text to 64 KiB of UTF-8.
 
-### Module Breakdown
+Both peers send v2 `hello` envelopes with name, salt and a fresh challenge. Each encrypts a version-labeled, ordered pair of both challenges into a `proof`; reflected handshakes are rejected. A valid returned proof enables chat; a wrong password or eight-second handshake timeout closes the session. `chat` contains only encrypted text, and `disconnect` terminates transport. Both clients must use the updated protocol; there is no downgrade to the old handshake.
 
-| File | Purpose |
-|------|---------|
-| `encryption.py` | PBKDF2 key derivation + Fernet encrypt/decrypt with shared-salt support |
-| `network.py` | UDP discovery service, TCP listener, TCP chat connection with length-prefixed framing |
-| `peer.py` | Peer model with staleness tracking + PeerManager registry |
-| `chat_app.py` | Main application — modern dark-themed tkinter GUI + all networking |
-| `chat_app1.py` | Convenience launcher for instance 1 (Alice, port 5001) |
-| `chat_app2.py` | Convenience launcher for instance 2 (Bob, port 5002) |
+Network/KDF/send workers post events into a queue. Tkinter consumes them on its thread, and obsolete session events are ignored. Changing identity or password requires disconnecting first.
 
-### Network Protocol
+## Checks
 
-**Discovery (UDP port 5000):**
-- Broadcast every 3 seconds: `{"type": "discovery", "name": "...", "ip": "...", "port": ...}`
-- Peers that stop broadcasting are pruned after 12 seconds
-
-**Chat (TCP, configurable port):**
-- Messages are framed as `[4-byte big-endian length][JSON payload]`
-- JSON envelope: `{"type": "handshake"|"chat"|"disconnect", "data": {...}}`
-- Chat payloads contain Fernet-encrypted ciphertext
-
-### Encryption
-
-1. Both users enter the **same password**
-2. PBKDF2-HMAC-SHA256 derives a 32-byte key (100,000 iterations + random 16-byte salt)
-3. The connecting peer sends its salt in the handshake so both sides can derive compatible keys
-4. Messages are encrypted with **Fernet** (AES-128-CBC + HMAC-SHA256)
-
-### CLI Options
-
-```
-python3 chat_app.py [--port PORT] [--discovery-port PORT] [--name NAME]
-
-  --port             TCP listen port (default: 5001)
-  --discovery-port   UDP discovery port (default: 5000)
-  --name             Preset display name
+```sh
+python -m unittest -v test_system
+python test_encryption.py
+python gui_check.py
 ```
 
-## Legacy Demo Files
+The last command opens two real windows and captures only their window region for report evidence; macOS may show a screen-recording permission dialog. It checks setup, password visibility, discovery, two-way chat, minimum window size, disconnect, reconnect and password mismatch. Results are saved to `reports/gui_checks.json`. See `reports/FINAL_CHECKS.md` for evidence and limits.
 
-| File | Description |
-|------|-------------|
-| `chat_demo.py` | Text-based demo |
-| `simple_chat.py` | Simple CLI chat demo |
-| `gui_chat.py` | Old minimal GUI |
-| `simple_demo.py` | Basic encryption demo |
-| `final_demo.py` | Final demo script |
-| `direct_test.py` | Direct encryption test |
+## Security boundaries
+
+Fernet uses AES-128 with authentication, not AES-256. Password confirmation proves shared-secret possession, not a person's identity. This educational protocol is not a PAKE: captured handshakes allow offline guessing. Use a strong secret. There is no forward secrecy, verified public identity, application sequence/replay defense, internet relay, group messaging, persistence or remote read receipt. Names, salts, addresses, timing and Fernet timestamps are observable. No independent security audit was performed.
+
+## Academic report
+
+See `reports/README.md` for the editable DOCX, PDF, identity fields and reproducible builder. Report packages are separate from runtime requirements. Legacy demo files remain historical examples and are not the supported launch path.

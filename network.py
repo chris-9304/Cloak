@@ -24,6 +24,7 @@ DISCOVERY_PORT = 5000          # UDP port for broadcast beacons
 DEFAULT_TCP_PORT = 5001        # Default TCP port for chat messages
 BROADCAST_INTERVAL = 3         # seconds between discovery beacons
 BUFFER_SIZE = 65536
+MAX_FRAME_SIZE = 1024 * 1024
 
 
 # ── helpers ─────────────────────────────────────────────────────────
@@ -75,14 +76,22 @@ class DiscoveryService:
         self._running = False
         self._broadcast_sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
+        self._listen_sock = None
+        self.on_error = None
+        self._stop_event = threading.Event()
 
     def start(self) -> None:
         self._running = True
+        self._stop_event.clear()
         threading.Thread(target=self._broadcast_loop, daemon=True).start()
         threading.Thread(target=self._listen_loop, daemon=True).start()
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
+        for sock in (self._listen_sock, self._broadcast_sock):
+            if sock:
+                sock.close()
 
     def update_username(self, name: str) -> None:
         self.username = name
@@ -91,8 +100,9 @@ class DiscoveryService:
         """Send an immediate burst of discovery beacons (3 rapid-fire)."""
         def _burst():
             for _ in range(3):
-                self._send_beacon()
-                time.sleep(0.3)
+                if self._running:
+                    self._send_beacon()
+                self._stop_event.wait(0.3)
         threading.Thread(target=_burst, daemon=True).start()
 
     # ── internals ───────────────────────────────────────────────────
@@ -123,7 +133,7 @@ class DiscoveryService:
     def _broadcast_loop(self) -> None:
         while self._running:
             self._send_beacon()
-            time.sleep(BROADCAST_INTERVAL)
+            self._stop_event.wait(BROADCAST_INTERVAL)
         with self._lock:
             if self._broadcast_sock:
                 try:
@@ -139,7 +149,14 @@ class DiscoveryService:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except (AttributeError, OSError):
             pass
-        sock.bind(("", self.discovery_port))
+        self._listen_sock = sock
+        try:
+            sock.bind(("", self.discovery_port))
+        except OSError as exc:
+            sock.close()
+            if self.on_error:
+                self.on_error(f"Discovery unavailable: {exc}. Use direct connection.")
+            return
         sock.settimeout(2)
         while self._running:
             try:
@@ -147,9 +164,12 @@ class DiscoveryService:
                 msg = json.loads(data.decode())
                 if msg.get("type") != "discovery":
                     continue
-                peer_ip = msg["ip"]
+                peer_ip = addr[0]
                 peer_port = msg["port"]
                 peer_name = msg["name"]
+                if (not isinstance(peer_name, str) or not 1 <= len(peer_name) <= 64
+                        or type(peer_port) is not int or not 1 <= peer_port <= 65535):
+                    continue
                 # Ignore our own broadcasts (compare ip AND port)
                 if peer_ip == self.local_ip and peer_port == self.tcp_port:
                     continue
@@ -219,6 +239,8 @@ class ChatConnection:
         with self._send_lock:
             try:
                 payload = json.dumps({"type": msg_type, "data": data}).encode()
+                if len(payload) > MAX_FRAME_SIZE:
+                    return False
                 header = struct.pack("!I", len(payload))
                 self.sock.sendall(header + payload)
                 return True
@@ -233,20 +255,22 @@ class ChatConnection:
             while self._running and self.sock:
                 header = _recv_exact(self.sock, 4)
                 length = struct.unpack("!I", header)[0]
-                if length > 10 * 1024 * 1024:  # sanity cap 10 MB
+                if not 0 < length <= MAX_FRAME_SIZE:
                     break
                 payload = _recv_exact(self.sock, length)
                 envelope = json.loads(payload.decode())
+                if not isinstance(envelope, dict) or not isinstance(envelope.get("data"), dict):
+                    break
                 msg_type = envelope.get("type", "")
                 data = envelope.get("data", {})
                 if msg_type == self.MSG_DISCONNECT:
                     break
                 if self.on_message:
                     self.on_message(msg_type, data)
-        except (ConnectionError, OSError):
+        except (ConnectionError, OSError, ValueError, UnicodeError, AttributeError):
             pass
         finally:
-            self._running = False
+            self.close()
             self._fire_disconnect()
 
     # ── teardown ────────────────────────────────────────────────────
@@ -259,16 +283,8 @@ class ChatConnection:
                 self.on_disconnect()
 
     def close(self) -> None:
-        was_running = self._running
         self._running = False
         if self.sock:
-            if was_running:
-                try:
-                    payload = json.dumps({"type": self.MSG_DISCONNECT, "data": {}}).encode()
-                    header = struct.pack("!I", len(payload))
-                    self.sock.sendall(header + payload)
-                except Exception:
-                    pass
             try:
                 self.sock.shutdown(socket.SHUT_RDWR)
             except Exception:
@@ -298,10 +314,6 @@ class TCPListener:
     def start(self) -> None:
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except (AttributeError, OSError):
-            pass
         self._server.bind(("0.0.0.0", self.port))
         self._server.listen(5)
         self._server.settimeout(2)
